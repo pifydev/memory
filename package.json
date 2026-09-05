@@ -1,6 +1,6 @@
 {
   "name": "@pify/memory",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Persistent memory across pi sessions: plain-markdown two-tier storage, FTS5 search via node:sqlite, secret-scanned writes, cache-stable injection",
   "keywords": [
     "pi-package",
@@ -31,8 +31,12 @@
     "LICENSE"
   ],
   "pi": {
-    "extensions": ["./extensions/memory.ts"],
-    "skills": ["./skills"]
+    "extensions": [
+      "./extensions/memory.ts"
+    ],
+    "skills": [
+      "./skills"
+    ]
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
@@ -45,9 +49,15 @@
     "typebox": "*"
   },
   "peerDependenciesMeta": {
-    "@earendil-works/pi-ai": { "optional": true },
-    "@earendil-works/pi-coding-agent": { "optional": true },
-    "typebox": { "optional": true }
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "typebox": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "^0.84.4",
