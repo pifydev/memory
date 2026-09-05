@@ -201,10 +201,51 @@ export default function memoryExtension(pi: ExtensionAPI) {
   // ── Command ──────────────────────────────────────────────────────────
 
   pi.registerCommand("memory", {
-    description: "Show memory status and file locations",
-    handler: async (_args, ctx) => {
+    description: "Memory: /memory [search <query> | read <global|project|list|YYYY-MM-DD>]",
+    handler: async (args, ctx) => {
       if (!ctx.hasUI) return;
       const p = requirePaths(ctx);
+
+      // v0.2: human-facing search/read routes — before this, only the agent
+      // could search memory.
+      const trimmed = (args ?? "").trim();
+      const searchMatch = /^search\s+(.+)$/i.exec(trimmed);
+      if (searchMatch) {
+        const result = await searchMemory(loadDocs(p), searchMatch[1]!, 8);
+        const text =
+          result.hits.length === 0
+            ? `No matches (${result.engine}).`
+            : result.hits.map((h) => `${h.file}:${h.line}\n${h.snippet}`).join("\n\n");
+        ctx.ui.notify(`Search (${result.engine})\n${text}`, "info");
+        return;
+      }
+      const readMatch = /^read(?:\s+(\S+))?$/i.exec(trimmed);
+      if (readMatch) {
+        const target = (readMatch[1] ?? "global").toLowerCase();
+        if (target === "list") {
+          const files = listDailyFiles(p);
+          ctx.ui.notify(files.length ? files.join("\n") : "No daily logs yet.", "info");
+          return;
+        }
+        const file =
+          target === "global"
+            ? p.globalMemory
+            : target === "project"
+              ? p.projectMemory
+              : /^\d{4}-\d{2}-\d{2}$/.test(target)
+                ? dailyFile(p.dailyDir, target)
+                : null;
+        if (!file) {
+          ctx.ui.notify("Usage: /memory read <global|project|list|YYYY-MM-DD>", "warning");
+          return;
+        }
+        ctx.ui.notify(readFileSafe(file) ?? `(empty — ${file} does not exist yet)`, "info");
+        return;
+      }
+      if (trimmed) {
+        ctx.ui.notify("Usage: /memory [search <query> | read <global|project|list|YYYY-MM-DD>]", "warning");
+        return;
+      }
       const dailies = listDailyFiles(p);
       const sizeOf = (f: string) => {
         const c = readFileSafe(f);
