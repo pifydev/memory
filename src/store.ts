@@ -125,14 +125,37 @@ export function forget(paths: MemoryPaths, pattern: string): ForgetResult {
   return { recoveryId: record.id, removed: removals.length, files: touched };
 }
 
-/** Re-append the lines captured in a recovery record to their files. */
+/**
+ * Snapshot a whole file before it is rewritten (consolidation), so the same
+ * /memory restore <id> path undoes it. Returns the recovery id.
+ */
+export function snapshotFile(paths: MemoryPaths, file: string, content: string): string {
+  ensureDirs(paths);
+  const record: RecoveryRecord = {
+    id: randomUUID(),
+    timestamp: Date.now(),
+    removals: [],
+    replacements: [{ file, content }],
+  };
+  writeFileSync(join(paths.recoveryDir, `${record.id}.json`), JSON.stringify(record, null, 2));
+  return record.id;
+}
+
+/**
+ * Undo a recovery record: whole-file snapshots are put back by replacement,
+ * forgotten lines by re-appending them.
+ */
 export function restore(paths: MemoryPaths, recoveryId: string): number {
   const file = join(paths.recoveryDir, `${recoveryId}.json`);
   const raw = readFileSafe(file);
   if (raw === null) throw new Error(`No recovery record ${recoveryId}.`);
   const record = JSON.parse(raw) as RecoveryRecord;
   let restored = 0;
-  for (const removal of record.removals) {
+  for (const replacement of record.replacements ?? []) {
+    writeFileSync(replacement.file, replacement.content);
+    restored++;
+  }
+  for (const removal of record.removals ?? []) {
     const content = readFileSafe(removal.file) ?? "";
     writeFileSync(removal.file, `${content.replace(/\n*$/, "\n")}${removal.text}\n`);
     restored++;

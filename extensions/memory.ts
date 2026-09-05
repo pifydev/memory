@@ -15,10 +15,29 @@
  * node:sqlite FTS5 + archive overview injection (samfoy/pi-session-search,
  * pi-knowledge-search); secret scanning (pi-hermes-memory).
  */
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+  DefaultResourceLoader,
+  SessionManager,
+  createAgentSession,
+  getAgentDir,
+  type AgentSession,
+  type ExtensionAPI,
+  type ExtensionCommandContext,
+  type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 
+import { writeFileSync } from "node:fs";
+
+import {
+  CONSOLIDATE_SYSTEM_PROMPT,
+  assessConsolidation,
+  buildConsolidatePrompt,
+  bulletsOf,
+  consolidationPreview,
+  parseConsolidation,
+} from "../src/consolidate.ts";
 import { buildInjectBlock } from "../src/inject.ts";
 import { dailyFile, localDateStr, resolvePaths, yesterdayStr } from "../src/paths.ts";
 import { ftsAvailable } from "../src/fts.ts";
@@ -32,10 +51,14 @@ import {
   listDailyFiles,
   readFileSafe,
   restore,
+  snapshotFile,
 } from "../src/store.ts";
 import type { MemoryPaths, MemoryScope } from "../src/types.ts";
 
 const MEMORY_CONTEXT_TYPE = "memory-context";
+const CONSOLIDATE_TIMEOUT_MS = 180_000;
+/** Below this, consolidation cannot pay for its own model call. */
+const MIN_ENTRIES_TO_CONSOLIDATE = 4;
 
 export default function memoryExtension(pi: ExtensionAPI) {
   let paths: MemoryPaths | null = null;
@@ -49,6 +72,127 @@ export default function memoryExtension(pi: ExtensionAPI) {
     return allMemoryFiles(p)
       .map((file) => ({ file, content: readFileSafe(file) ?? "" }))
       .filter((d) => d.content.trim() !== "");
+  }
+
+  /** Resolve a consolidation target to its file, or null when unknown. */
+  function targetFile(p: MemoryPaths, target: string): string | null {
+    if (target === "global") return p.globalMemory;
+    if (target === "project") return p.projectMemory;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(target)) return dailyFile(p.dailyDir, target);
+    return null;
+  }
+
+  /**
+   * Ask a model to fold duplicates and superseded facts together, then show
+   * the user exactly what would change. Nothing is written without an
+   * explicit yes, and the previous content is kept as a recovery record —
+   * this is the one place where an LLM touches memory the user owns.
+   */
+  async function runConsolidate(ctx: ExtensionCommandContext, p: MemoryPaths, target: string): Promise<void> {
+    const file = targetFile(p, target);
+    if (!file) {
+      ctx.ui.notify("Usage: /memory consolidate <global|project|YYYY-MM-DD>", "warning");
+      return;
+    }
+    const before = readFileSafe(file);
+    if (before === null || before.trim() === "") {
+      ctx.ui.notify(`Nothing to consolidate — ${file} is empty.`, "warning");
+      return;
+    }
+    if (bulletsOf(before).length < MIN_ENTRIES_TO_CONSOLIDATE) {
+      ctx.ui.notify(
+        `Only ${bulletsOf(before).length} entr(ies) in ${file} — not worth a model call yet.`,
+        "info",
+      );
+      return;
+    }
+
+    ctx.ui.notify(`Consolidating ${file}…`, "info");
+    let session: AgentSession | null = null;
+    let answer = "";
+    try {
+      const created = await createAgentSession({
+        sessionManager: SessionManager.inMemory(ctx.cwd),
+        model: ctx.model as never,
+        // No tools: this is a pure text transformation of content we hand it.
+        tools: [],
+        resourceLoader: new DefaultResourceLoader({
+          cwd: ctx.cwd,
+          agentDir: getAgentDir(),
+          noExtensions: true,
+          noPromptTemplates: true,
+          noThemes: true,
+          appendSystemPrompt: [CONSOLIDATE_SYSTEM_PROMPT],
+        } as never),
+      });
+      session = created.session;
+      await session.prompt(buildConsolidatePrompt(target, before), {
+        signal: AbortSignal.timeout(CONSOLIDATE_TIMEOUT_MS),
+      } as never);
+      const messages = session.messages as Array<{ role?: string; content?: Array<{ type?: string; text?: string }> }>;
+      const last = [...messages].reverse().find((m) => m.role === "assistant");
+      answer = (last?.content ?? [])
+        .filter((part) => part.type === "text" && typeof part.text === "string")
+        .map((part) => part.text)
+        .join("");
+    } catch (err) {
+      ctx.ui.notify(`Consolidation failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+      return;
+    } finally {
+      try {
+        session?.dispose();
+      } catch {
+        // best-effort
+      }
+    }
+
+    const after = parseConsolidation(answer);
+    if (!after) {
+      ctx.ui.notify("The model did not return a usable markdown block — nothing was changed.", "warning");
+      return;
+    }
+    const assessment = assessConsolidation(before, after);
+    if (!assessment.ok) {
+      ctx.ui.notify(
+        [
+          `Refused the proposal: ${assessment.reason}.`,
+          ...assessment.invented.slice(0, 3).map((line) => `  invented: ${line.slice(0, 90)}`),
+          "Nothing was changed.",
+        ].join("\n"),
+        "warning",
+      );
+      return;
+    }
+    // The consolidated text goes back into a file that is re-injected every
+    // session, so it passes the same secret gate as any other write.
+    try {
+      assertNoSecrets(after);
+    } catch (err) {
+      ctx.ui.notify(`Refused: ${err instanceof Error ? err.message : String(err)}`, "error");
+      return;
+    }
+
+    const approved = await ctx.ui.confirm(
+      "Apply consolidation",
+      `${consolidationPreview(before, after)}\n\nWrite this to ${file}?`,
+    );
+    if (!approved) {
+      ctx.ui.notify("Consolidation discarded.", "info");
+      return;
+    }
+
+    const recoveryId = snapshotFile(p, file, before);
+    writeFileSync(file, after.endsWith("\n") ? after : `${after}\n`);
+    ctx.ui.notify(
+      [
+        `Consolidated ${file}.`,
+        `${assessment.removedCount} entr${assessment.removedCount === 1 ? "y" : "ies"} folded in, ${assessment.keptCount} kept.`,
+        recoveryId ? `Undo with: /memory restore ${recoveryId}` : "",
+      ]
+        .filter(Boolean)
+        .join("\n"),
+      "info",
+    );
   }
 
   // ── Injection: once per session, hidden, before any user message ─────
@@ -201,7 +345,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
   // ── Command ──────────────────────────────────────────────────────────
 
   pi.registerCommand("memory", {
-    description: "Memory: /memory [search <query> | read <global|project|list|YYYY-MM-DD>]",
+    description: "Memory: /memory [search <query> | read <target> | consolidate <target>]",
     handler: async (args, ctx) => {
       if (!ctx.hasUI) return;
       const p = requirePaths(ctx);
@@ -219,6 +363,13 @@ export default function memoryExtension(pi: ExtensionAPI) {
         ctx.ui.notify(`Search (${result.engine})\n${text}`, "info");
         return;
       }
+      // v0.3: LLM consolidation — proposes, never writes on its own.
+      const consolidateMatch = /^consolidate(?:\s+(\S+))?$/i.exec(trimmed);
+      if (consolidateMatch) {
+        await runConsolidate(ctx, p, (consolidateMatch[1] ?? "global").toLowerCase());
+        return;
+      }
+
       const readMatch = /^read(?:\s+(\S+))?$/i.exec(trimmed);
       if (readMatch) {
         const target = (readMatch[1] ?? "global").toLowerCase();
@@ -243,7 +394,10 @@ export default function memoryExtension(pi: ExtensionAPI) {
         return;
       }
       if (trimmed) {
-        ctx.ui.notify("Usage: /memory [search <query> | read <global|project|list|YYYY-MM-DD>]", "warning");
+        ctx.ui.notify(
+          "Usage: /memory [search <query> | read <global|project|list|YYYY-MM-DD> | consolidate <global|project|YYYY-MM-DD>]",
+          "warning",
+        );
         return;
       }
       const dailies = listDailyFiles(p);

@@ -40,6 +40,8 @@ export interface RecoveryRecord {
   id: string;
   timestamp: number;
   removals: Array<{ file: string; text: string }>;
+  /** Whole-file snapshots (v0.3 consolidation): restored by replacement. */
+  replacements?: Array<{ file: string; content: string }>;
 }
 
 /** Injection caps: memory must never crowd out the actual conversation. */
