@@ -25,6 +25,9 @@ Part of the [Pify suite](https://github.com/pifydev). Install with [`pify instal
 | `memory_forget` | Delete matching entries (writes a recovery record) |
 | `memory_restore` | Undo a forget by recovery id |
 | `/memory` | Status: file paths, sizes, active search engine |
+| `/memory search <query>` | Search memory yourself, without asking the agent |
+| `/memory read <global\|project\|list\|YYYY-MM-DD>` | Print a memory file |
+| `/memory consolidate <global\|project\|YYYY-MM-DD>` | Propose a merged, de-duplicated file (v0.3) |
 
 ## Migrating from pi-memory
 
