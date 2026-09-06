@@ -12,7 +12,7 @@ Part of the [Pify suite](https://github.com/pifydev). Install with [`pify instal
 - **Real search, zero dependencies**: BM25 full-text search through SQLite FTS5 via `node:sqlite` (built into Node 24+ and Bun); on Node 22 hosts it silently falls back to an in-process paragraph scan. Either way `memory_search` works out of the box.
 - **Secret gate**: every write is scanned (AWS/GitHub/Slack/OpenAI/Google/npm keys, private key blocks, JWTs, `api_key=` assignments) and rejected with an explanation — credentials can never enter files that get re-injected into every session.
 - **Undoable forgetting**: `memory_forget` writes a recovery record first; `memory_restore <id>` brings entries back.
-- **Cache-stable injection**: memory is injected once per session as a hidden message before your first prompt (full `MEMORY.md` tiers capped + today/yesterday logs + an overview of the searchable archive) — the provider request prefix stays stable, so prompt caching keeps working.
+- **Cache-stable injection**: memory is injected once per session as a hidden message before your first prompt (full `MEMORY.md` tiers capped + today/yesterday logs + an overview of the searchable archive) — the provider request prefix stays stable, so prompt caching keeps working. Measured, not asserted: `bun run test/live/wire.mjs` captures the real provider payload through `before_provider_request` and checks the marker reached the model, that it is **not** in the system prompt, and that the system prompt is byte-identical across runs (v0.5; technique from [`pi-code`](https://github.com/ilovepixelart/pi-code)).
 - **Local-day discipline**: daily logs are keyed by your local calendar day, not UTC.
 
 ## Tools & command
