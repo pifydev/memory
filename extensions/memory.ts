@@ -31,6 +31,14 @@ import { Type } from "typebox";
 import { writeFileSync } from "node:fs";
 
 import {
+  LESSON_CATEGORIES,
+  extractLessons,
+  formatLesson,
+  lessonsBlock,
+  recallLessons,
+  type LessonCategory,
+} from "../src/lessons.ts";
+import {
   CONSOLIDATE_SYSTEM_PROMPT,
   assessConsolidation,
   buildConsolidatePrompt,
@@ -209,12 +217,19 @@ export default function memoryExtension(pi: ExtensionAPI) {
       .some((entry) => (entry as { customType?: string }).customType === MEMORY_CONTEXT_TYPE);
     if (alreadyInjected) return;
 
+    // Recent failures and corrections come along unprompted: a lesson that
+    // has to be searched for is a lesson that gets repeated.
+    const lessons = recallLessons(
+      loadDocs(p).flatMap((doc) => extractLessons(doc.file, doc.content)),
+    );
+
     const block = buildInjectBlock({
       globalMemory: readFileSafe(p.globalMemory),
       projectMemory: readFileSafe(p.projectMemory),
       today: readFileSafe(dailyFile(p.dailyDir, localDateStr())),
       yesterday: readFileSafe(dailyFile(p.dailyDir, yesterdayStr())),
       dailyDates: listDailyFiles(p).map((f) => f.replace(/\.md$/, "")),
+      lessons: lessonsBlock(lessons),
     });
     if (block) {
       pi.sendMessage({ customType: MEMORY_CONTEXT_TYPE, content: block, display: false });
@@ -230,19 +245,31 @@ export default function memoryExtension(pi: ExtensionAPI) {
       "Save one durable memory entry. scope=global for cross-project facts and preferences, " +
       "scope=project for facts about this repository, scope=daily for a dated activity log entry. " +
       "Save when the user asks you to remember something or corrects you in a way that should stick. " +
+      "Set category when the entry is a lesson: failure (something tried that did not work, with the " +
+      "error), correction (something the user told you not to repeat), tool-quirk (non-obvious tool " +
+      "behaviour), insight, preference, or convention. Categorised failures and corrections are " +
+      "recalled at the start of later sessions, so a mistake costs its explanation once. " +
       "Never save credentials — writes are secret-scanned and rejected.",
     parameters: Type.Object({
       scope: StringEnum(["global", "project", "daily"] as const),
       text: Type.String({ description: "One concise entry (a sentence or two)" }),
+      category: Type.Optional(StringEnum(LESSON_CATEGORIES)),
     }),
-    async execute(_id, params: { scope: MemoryScope; text: string }, _signal, _onUpdate, ctx) {
+    async execute(
+      _id,
+      params: { scope: MemoryScope; text: string; category?: LessonCategory },
+      _signal,
+      _onUpdate,
+      ctx,
+    ) {
       const text = params.text.trim();
       if (!text) throw new Error("memory_write requires non-empty text.");
       assertNoSecrets(text);
-      const file = appendEntry(requirePaths(ctx as ExtensionContext), params.scope, text);
+      const body = params.category ? formatLesson(params.category, text) : text;
+      const file = appendEntry(requirePaths(ctx as ExtensionContext), params.scope, body);
       return {
         content: [{ type: "text", text: `Saved to ${file}` }],
-        details: { file, scope: params.scope },
+        details: { file, scope: params.scope, ...(params.category ? { category: params.category } : {}) },
       };
     },
   });

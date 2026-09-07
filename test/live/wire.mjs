@@ -41,7 +41,8 @@ try {
   mkdirSync(join(memoryDir, "daily"), { recursive: true });
   writeFileSync(
     join(memoryDir, "MEMORY.md"),
-    "# Long-term memory\n\n- The deploy target is Vercel, project WIREPROBE-MARKER\n",
+    "# Long-term memory\n\n- The deploy target is Vercel, project WIREPROBE-MARKER\n" +
+      "- [failure] WIREPROBE-LESSON: npm ci fails behind the proxy, use --offline\n",
   );
 
   const probe = join(home, "wire-probe.ts");
@@ -107,6 +108,14 @@ try {
     "and it is NOT in the system prompt",
     !systemOf(a).includes("WIREPROBE-MARKER"),
     "memory injects as a hidden message, which is what keeps the prefix stable",
+  );
+  check(
+    "a recalled lesson reached the model",
+    payloads.some((p) => JSON.stringify(p).includes("WIREPROBE-LESSON")),
+  );
+  check(
+    "and the lesson is not in the system prompt either",
+    !systemOf(a).includes("WIREPROBE-LESSON"),
   );
   check(
     "the system prompt is byte-identical across runs",

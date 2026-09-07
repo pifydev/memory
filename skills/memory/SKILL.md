@@ -34,3 +34,19 @@ secret-scanned and rejected; name the env var that holds a secret instead.
 
 Only delete when the user asks. Always report the recoveryId so the user can
 undo with memory_restore.
+
+## Lessons
+
+When something fails, the user corrects you, or a tool behaves in a way its
+docs do not describe, save it with a `category`:
+
+- `failure` — what was tried and what the error was. Not "the build broke";
+  "npm ci fails behind the proxy with ETIMEDOUT, use --offline".
+- `correction` — what the user told you not to repeat.
+- `tool-quirk` — non-obvious behaviour of a tool, package manager, or API.
+- `insight`, `preference`, `convention` — durable, but not urgent enough to
+  push into the next session.
+
+Recent failures and corrections arrive automatically at the start of later
+sessions. Check them before retrying something that failed before; the point
+of writing one down is that the mistake costs its explanation once.
