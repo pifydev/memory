@@ -25,23 +25,38 @@ function cap(text: string, max: number): string {
   return `${text.slice(0, max)}\n… (truncated — read the full file with memory_read)`;
 }
 
+/**
+ * Memory content is data, and it goes inside a tagged block that tells the
+ * model exactly that. A line reading `</memory>` in a memory file would end
+ * the block early, and everything after it would arrive looking like the
+ * extension's own framing rather than like the user's notes — which is the
+ * whole difference between prior context and an instruction.
+ *
+ * These files are hand-editable by design, and the project tier is editable
+ * by anyone with commit access to the repository, so this is not a
+ * hypothetical shape for the text to take.
+ */
+export function neutralizeBlockTags(text: string): string {
+  return text.replaceAll(/<(\/?)memory(\s[^>]*)?>/gi, "&lt;$1memory$2&gt;");
+}
+
 export function buildInjectBlock(input: InjectInput): string | null {
   const sections: string[] = [];
 
   if (input.globalMemory?.trim()) {
-    sections.push(`## Long-term memory (global)\n${cap(input.globalMemory.trim(), MAX_INJECT_CHARS_PER_FILE)}`);
+    sections.push(`## Long-term memory (global)\n${neutralizeBlockTags(cap(input.globalMemory.trim(), MAX_INJECT_CHARS_PER_FILE))}`);
   }
   if (input.projectMemory?.trim()) {
-    sections.push(`## Project memory\n${cap(input.projectMemory.trim(), MAX_INJECT_CHARS_PER_FILE)}`);
+    sections.push(`## Project memory\n${neutralizeBlockTags(cap(input.projectMemory.trim(), MAX_INJECT_CHARS_PER_FILE))}`);
   }
   if (input.today?.trim()) {
-    sections.push(`## Today's log\n${cap(input.today.trim(), MAX_DAILY_INJECT_CHARS)}`);
+    sections.push(`## Today's log\n${neutralizeBlockTags(cap(input.today.trim(), MAX_DAILY_INJECT_CHARS))}`);
   }
   if (input.yesterday?.trim()) {
-    sections.push(`## Yesterday's log\n${cap(input.yesterday.trim(), MAX_DAILY_INJECT_CHARS)}`);
+    sections.push(`## Yesterday's log\n${neutralizeBlockTags(cap(input.yesterday.trim(), MAX_DAILY_INJECT_CHARS))}`);
   }
 
-  if (input.lessons?.trim()) sections.push(input.lessons.trim());
+  if (input.lessons?.trim()) sections.push(neutralizeBlockTags(input.lessons.trim()));
 
   const archived = input.dailyDates.length;
   if (archived > 2) {

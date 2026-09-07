@@ -28,7 +28,8 @@ import {
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 import {
   LESSON_CATEGORIES,
@@ -47,6 +48,14 @@ import {
   parseConsolidation,
 } from "../src/consolidate.ts";
 import { buildInjectBlock } from "../src/inject.ts";
+import {
+  consentQuestion,
+  decideConsent,
+  envConsent,
+  parseConsent,
+  readConsent,
+  writeConsent,
+} from "../src/consent.ts";
 import { dailyFile, localDateStr, resolvePaths, yesterdayStr } from "../src/paths.ts";
 import { ftsAvailable } from "../src/fts.ts";
 import { searchMemory } from "../src/search.ts";
@@ -74,6 +83,41 @@ export default function memoryExtension(pi: ExtensionAPI) {
   function requirePaths(ctx: { cwd: string }): MemoryPaths {
     if (!paths) paths = resolvePaths(ctx.cwd);
     return paths;
+  }
+
+  /** Where the suite records which projects you approved, and for what. */
+  function consentFile(): string {
+    return join(getAgentDir(), "pify-project-consent.json");
+  }
+
+  /**
+   * May this repository's own memory file be injected? pi never asked about
+   * it — `.pi/memory/MEMORY.md` is not one of the resources pi loads — so the
+   * question is ours to put, once per project.
+   */
+  async function projectMemoryAllowed(ctx: ExtensionContext, p: MemoryPaths): Promise<boolean> {
+    if (!existsSync(p.projectMemory)) return false;
+    const file = consentFile();
+    const store = parseConsent(readFileSafe(file));
+    const verdict = decideConsent({
+      projectTrusted: ctx.isProjectTrusted(),
+      remembered: readConsent(store, ctx.cwd, "memory"),
+      hasUI: ctx.hasUI,
+      envOverride: envConsent(process.env),
+    });
+    if (verdict !== "ask") return verdict === "allow";
+
+    const approved = await ctx.ui.confirm(
+      "Load this project's memory?",
+      consentQuestion("its own memory file, which is injected before your first prompt", p.projectMemory),
+    );
+    try {
+      writeFileSync(file, `${JSON.stringify(writeConsent(store, ctx.cwd, "memory", approved), null, 2)}
+`);
+    } catch {
+      // An unwritable consent file costs us the memory of the answer, not the answer.
+    }
+    return approved;
   }
 
   function loadDocs(p: MemoryPaths) {
@@ -217,15 +261,24 @@ export default function memoryExtension(pi: ExtensionAPI) {
       .some((entry) => (entry as { customType?: string }).customType === MEMORY_CONTEXT_TYPE);
     if (alreadyInjected) return;
 
+    // `.pi/memory/MEMORY.md` is shipped by the repository, and this block is
+    // injected before your first prompt in every session — a repo you had just
+    // cloned would otherwise get to put text in front of the model on its own
+    // say-so.
+    const projectTrusted = await projectMemoryAllowed(ctx, p);
+
     // Recent failures and corrections come along unprompted: a lesson that
-    // has to be searched for is a lesson that gets repeated.
+    // has to be searched for is a lesson that gets repeated. Lessons from the
+    // untrusted project file are held back for the same reason its memory is.
     const lessons = recallLessons(
-      loadDocs(p).flatMap((doc) => extractLessons(doc.file, doc.content)),
+      loadDocs(p)
+        .filter((doc) => projectTrusted || doc.file !== p.projectMemory)
+        .flatMap((doc) => extractLessons(doc.file, doc.content)),
     );
 
     const block = buildInjectBlock({
       globalMemory: readFileSafe(p.globalMemory),
-      projectMemory: readFileSafe(p.projectMemory),
+      projectMemory: projectTrusted ? readFileSafe(p.projectMemory) : null,
       today: readFileSafe(dailyFile(p.dailyDir, localDateStr())),
       yesterday: readFileSafe(dailyFile(p.dailyDir, yesterdayStr())),
       dailyDates: listDailyFiles(p).map((f) => f.replace(/\.md$/, "")),
@@ -437,7 +490,10 @@ export default function memoryExtension(pi: ExtensionAPI) {
         [
           "Memory status",
           `  global   ${p.globalMemory} (${sizeOf(p.globalMemory)})`,
-          `  project  ${p.projectMemory} (${sizeOf(p.projectMemory)})`,
+          `  project  ${p.projectMemory} (${sizeOf(p.projectMemory)})` +
+            (readConsent(parseConsent(readFileSafe(consentFile())), ctx.cwd, "memory") === true
+              ? ""
+              : " — NOT injected: you have not approved this project's memory"),
           `  daily    ${dailies.length} log(s) in ${p.dailyDir}`,
           `  search   ${engine}`,
           "Tools: memory_write · memory_read · memory_search · memory_forget · memory_restore",
