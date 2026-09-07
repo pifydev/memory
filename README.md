@@ -4,36 +4,65 @@ Persistent memory for [pi](https://github.com/earendil-works/pi): durable facts,
 
 Part of the [Pify suite](https://github.com/pifydev). Install with [`pify install memory`](https://github.com/pifydev/cli) or `pi install npm:@pify/memory`.
 
-## What it does
+## Why
 
-- **Two-tier markdown storage**: global `~/.pi/agent/memory/` (`MEMORY.md` + `daily/YYYY-MM-DD.md`) for cross-project facts, and `.pi/memory/MEMORY.md` for per-repository conventions. Files are yours — read them, edit them, commit the project tier to git.
-- **Explicit learning**: the agent saves when you ask ("remember that…") or when a correction should stick — via tools, never via surprise LLM calls at shutdown.
-- **Consolidation you asked for** (v0.3): `/memory consolidate <global|project|YYYY-MM-DD>` hands the file to a model that merges duplicates and drops facts a later entry already corrected. It only ever *proposes*: the result is refused outright if it invents an entry that appears nowhere in the original, empties the file, or drops more than 60% of it; it passes the same secret gate as any write; you see a preview and confirm; and the previous content is kept as a recovery record, so `/memory restore <id>` puts it back.
-- **Lessons that stop a repeat** (v0.5): `memory_write` takes an optional `category` — `failure`, `correction`, `insight`, `preference`, `convention`, `tool-quirk` — stored as a readable bullet (`- [failure] npm ci fails behind the proxy, use --offline`), so the files stay plain markdown. Recent **failures and corrections are recalled unprompted** at session start, newest first, capped at 8 entries and 30 days: a lesson you have to search for is a lesson that gets repeated, and an old one about a file that no longer exists costs context and credibility. The other categories stay searchable but are not pushed. (Category vocabulary from [`pi-hermes-memory`](https://github.com/chandra447/pi-hermes-memory).)
-- **Current evidence wins** (v0.5): the injected block now says what to do when memory disagrees with the repository — prefer what you can see, and say memory disagreed. Memory outlives the code it describes, and the project tier is a file anyone with repo access can edit.
-- **Real search, zero dependencies**: BM25 full-text search through SQLite FTS5 via `node:sqlite` (built into Node 24+ and Bun); on Node 22 hosts it silently falls back to an in-process paragraph scan. Either way `memory_search` works out of the box.
-- **Secret gate**: every write is scanned (AWS/GitHub/Slack/OpenAI/Google/npm keys, private key blocks, JWTs, `api_key=` assignments) and rejected with an explanation — credentials can never enter files that get re-injected into every session.
-- **Undoable forgetting**: `memory_forget` writes a recovery record first; `memory_restore <id>` brings entries back.
-- **Cache-stable injection**: memory is injected once per session as a hidden message before your first prompt (full `MEMORY.md` tiers capped + today/yesterday logs + an overview of the searchable archive) — the provider request prefix stays stable, so prompt caching keeps working. Measured, not asserted: `bun run test/live/wire.mjs` captures the real provider payload through `before_provider_request` and checks the marker reached the model, that it is **not** in the system prompt, and that the system prompt is byte-identical across runs (v0.4.1; technique from [`pi-code`](https://github.com/ilovepixelart/pi-code)).
-- **Local-day discipline**: daily logs are keyed by your local calendar day, not UTC.
+Everything an agent learns about you disappears when the session ends: the convention it was corrected on, the command that fails behind your proxy, the reason the obvious fix does not work here. You explain it again next week.
 
-## Tools & command
+The design constraint is that memory must never become a black box. Every file is markdown you can open, and the agent writes only when you ask or when a correction should stick — never through a surprise model call at shutdown that summarises your session into something you did not sanction.
 
-| Surface | What it does |
-|---|---|
-| `memory_write` | Save one entry to `global` / `project` / `daily` |
-| `memory_read` | Read any memory file, or list daily logs |
-| `memory_search` | FTS5/scan search across all memory files |
-| `memory_forget` | Delete matching entries (writes a recovery record) |
-| `memory_restore` | Undo a forget by recovery id |
-| `/memory` | Status: file paths, sizes, active search engine |
-| `/memory search <query>` | Search memory yourself, without asking the agent |
-| `/memory read <global\|project\|list\|YYYY-MM-DD>` | Print a memory file |
-| `/memory consolidate <global\|project\|YYYY-MM-DD>` | Propose a merged, de-duplicated file (v0.3) |
+## Storage
 
-## Migrating from pi-memory
+Two tiers, both plain markdown:
 
-`@pify/memory` uses the same on-disk layout as jayzeng's `pi-memory`, so your existing `MEMORY.md` and daily logs carry over untouched. The two register the same tool names and cannot run side by side — remove the old one first:
+- **Global** — `~/.pi/agent/memory/`, holding `MEMORY.md` and `daily/YYYY-MM-DD.md`, for facts that follow you across projects.
+- **Project** — `.pi/memory/MEMORY.md`, for conventions belonging to one repository. Commit it if the team should share it.
+
+Daily logs are keyed by your **local** calendar day, not UTC, so "yesterday" means the day you actually worked.
+
+## Tools
+
+| Tool | Parameters | What it does |
+|---|---|---|
+| `memory_write` | `scope`: `global` \| `project` \| `daily`, `text`, `category?` | Save one entry |
+| `memory_read` | `target`: `global` \| `project` \| `daily` \| `list`, `date?` | Read a memory file, or list the daily logs |
+| `memory_search` | `query` | Full-text search across every memory file |
+| `memory_forget` | `pattern` | Delete matching entries, writing a recovery record first |
+| `memory_restore` | `recoveryId` | Undo a `memory_forget` |
+
+## Lessons that stop a repeat
+
+`memory_write` takes an optional `category`: `failure`, `correction`, `insight`, `preference`, `convention`, or `tool-quirk`. It is stored as a readable bullet, so the files stay ordinary markdown:
+
+```markdown
+- [failure] npm ci fails behind the proxy, use --offline
+```
+
+Recent **failures and corrections are recalled unprompted** at the start of later sessions, newest first, capped at 8 entries and 30 days. A lesson you have to search for is a lesson that gets repeated; an old one about a file that no longer exists costs context and credibility. The other categories stay searchable but are not pushed at the agent.
+
+## Behaviour
+
+- **Current evidence wins.** The injected block says explicitly what to do when memory disagrees with the repository: prefer what you can see, and say that memory disagreed. Memory outlives the code it describes, and the project tier is a file anyone with repo access can edit.
+- **Cache-stable injection.** Memory arrives once per session as a hidden message before your first prompt — the capped `MEMORY.md` tiers, today's and yesterday's logs, and an overview of the searchable archive. It never touches the system prompt, so the provider request prefix stays stable and prompt caching keeps working. This is measured rather than asserted: `bun run test/live/wire.mjs` captures the real provider payload and checks that the content reached the model, that it is **not** in the system prompt, and that the system prompt is byte-identical across runs.
+- **Secret gate.** Every write is scanned for AWS, GitHub, Slack, OpenAI, Google and npm keys, private key blocks, JWTs, and `api_key=` assignments, and rejected with an explanation. Credentials must never enter files that are re-injected into every session.
+- **Undoable forgetting.** `memory_forget` writes a recovery record before deleting and reports the id; `memory_restore <id>` puts the entries back.
+- **Real search, zero dependencies.** BM25 full-text search through SQLite FTS5 via `node:sqlite`, built into Node 24+ and Bun. On Node 22 hosts it falls back silently to an in-process paragraph scan. Either way `memory_search` works out of the box, with nothing to install.
+
+## Consolidation you asked for
+
+`/memory consolidate <global|project|YYYY-MM-DD>` hands the file to a model that merges duplicates and drops facts a later entry already corrected.
+
+It only ever *proposes*. The result is refused outright if it invents an entry appearing nowhere in the original, empties the file, or drops more than 60% of it. It passes the same secret gate as any other write. You see a preview and confirm. And the previous content is kept as a recovery record, so `/memory restore <id>` puts it back.
+
+## Command
+
+`/memory` — status: file paths, sizes, and which search engine is active.
+`/memory search <query>` — search yourself, without going through the agent.
+`/memory read <global|project|list|YYYY-MM-DD>` — print a memory file.
+`/memory consolidate <global|project|YYYY-MM-DD>` — propose a merged, de-duplicated file.
+
+## Conflicts
+
+This extension registers the `memory_*` tool names, so it cannot run alongside another that registers the same ones. If you have `pi-memory` installed, remove it first — the on-disk layout is compatible, so existing `MEMORY.md` files and daily logs carry over untouched:
 
 ```bash
 pi remove npm:pi-memory
