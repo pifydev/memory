@@ -1,6 +1,6 @@
 ---
 name: memory
-description: Use when the user asks you to remember something, corrects you in a way that should stick, or asks about past work/decisions - explains when to use the memory tools and what belongs in each scope
+description: Use when the user asks you to remember something, corrects you in a way that should stick, or asks about past work/decisions
 ---
 
 # Persistent memory
