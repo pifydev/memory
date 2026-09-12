@@ -48,6 +48,7 @@ import {
   parseConsolidation,
 } from "../src/consolidate.ts";
 import { buildInjectBlock, isInjectedInContext } from "../src/inject.ts";
+import { withUiLock } from "../src/ui-lock.ts";
 import {
   consentQuestion,
   decideConsent,
@@ -139,9 +140,11 @@ export default function memoryExtension(pi: ExtensionAPI) {
     });
     if (verdict !== "ask") return verdict === "allow";
 
-    const approved = await ctx.ui.confirm(
-      "Load this project's memory?",
-      consentQuestion("its own memory file, which is injected before your first prompt", p.projectMemory),
+    const approved = await withUiLock(() =>
+      ctx.ui.confirm(
+        "Load this project's memory?",
+        consentQuestion("its own memory file, which is injected before your first prompt", p.projectMemory),
+      ),
     );
     try {
       writeFileSync(file, `${JSON.stringify(writeConsent(store, ctx.cwd, "memory", approved), null, 2)}
