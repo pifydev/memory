@@ -157,9 +157,16 @@ export default function memoryExtension(pi: ExtensionAPI) {
    * text in it.
    *
    * Not simply the last assistant message: a thinking model's final message
-   * can carry only reasoning blocks, and taking it yields an empty answer
-   * with no error to explain it. Measured on anthropic/claude-opus-5, which
-   * returned 0 characters this way while openai/gpt-5.6 returned the note.
+   * can carry only reasoning blocks, and taking it would yield an empty
+   * answer with no error to explain it.
+   *
+   * Defensive, and honestly so — no measured case yet shows it changing an
+   * outcome. It was written while chasing the empty answers from
+   * anthropic/claude-opus-5 and it is *not* the cure for those: that model
+   * returns no text anywhere in the conversation through this path, scanning
+   * backwards or not, while openai/gpt-5.6 and qwen3-235b both answer
+   * normally. The empty-answer guard below is what actually makes that
+   * visible.
    */
   function answerText(session: AgentSession): string {
     const messages = session.messages as Array<{
