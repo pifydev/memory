@@ -562,6 +562,10 @@ export default function memoryExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "memory_write",
     label: "Memory write",
+    promptSnippet: "Save one durable fact, project convention, or dated log entry",
+    promptGuidelines: [
+      "Use memory_write when the user asks you to remember something, or corrects you in a way that should still be true next session; a correction you do not save is one you will repeat.",
+    ],
     description:
       "Save one durable memory entry. scope=global for cross-project facts and preferences, " +
       "scope=project for facts about this repository, scope=daily for a dated activity log entry. " +
@@ -598,6 +602,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "memory_read",
     label: "Memory read",
+    promptSnippet: "Read a memory file, or list the daily logs",
     description:
       "Read a memory file in full: target=global|project reads that MEMORY.md, target=daily reads a " +
       "dated log (date defaults to today, format YYYY-MM-DD), target=list lists available daily logs.",
@@ -631,6 +636,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "memory_search",
     label: "Memory search",
+    promptSnippet: "Full-text search across every memory file",
     description:
       "Full-text search across all memory files (global, project, and every daily log). " +
       "Use before assuming something was never recorded.",
@@ -657,6 +663,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "memory_forget",
     label: "Memory forget",
+    promptSnippet: "Delete matching memory entries, keeping a recovery record",
     description:
       "Delete memory entries whose text contains the pattern (case-insensitive), across all memory " +
       "files. A recovery record is written first; report the recoveryId to the user so the deletion " +
@@ -677,6 +684,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
   pi.registerTool({
     name: "memory_restore",
     label: "Memory restore",
+    promptSnippet: "Undo a memory_forget by its recovery id",
     description: "Undo a memory_forget deletion using its recovery id.",
     parameters: Type.Object({
       recoveryId: Type.String(),
