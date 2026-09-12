@@ -47,7 +47,7 @@ import {
   consolidationPreview,
   parseConsolidation,
 } from "../src/consolidate.ts";
-import { buildInjectBlock } from "../src/inject.ts";
+import { buildInjectBlock, isInjectedInContext } from "../src/inject.ts";
 import {
   consentQuestion,
   decideConsent,
@@ -91,11 +91,25 @@ export default function memoryExtension(pi: ExtensionAPI) {
   }
 
   /**
+   * This session's answer about the project file, so a re-injection after a
+   * compaction never pops a consent dialog in the middle of someone's work.
+   * The question is asked at most once per session; the on-disk store keeps
+   * it across sessions.
+   */
+  let projectConsent: boolean | null = null;
+
+  /**
    * May this repository's own memory file be injected? pi never asked about
    * it — `.pi/memory/MEMORY.md` is not one of the resources pi loads — so the
    * question is ours to put, once per project.
    */
   async function projectMemoryAllowed(ctx: ExtensionContext, p: MemoryPaths): Promise<boolean> {
+    if (projectConsent !== null) return projectConsent;
+    projectConsent = await askProjectMemoryAllowed(ctx, p);
+    return projectConsent;
+  }
+
+  async function askProjectMemoryAllowed(ctx: ExtensionContext, p: MemoryPaths): Promise<boolean> {
     if (!existsSync(p.projectMemory)) return false;
     const file = consentFile();
     const store = parseConsent(readFileSafe(file));
@@ -249,18 +263,13 @@ export default function memoryExtension(pi: ExtensionAPI) {
 
   // ── Injection: once per session, hidden, before any user message ─────
 
-  pi.on("session_start", async (_event, ctx) => {
-    const p = requirePaths(ctx);
-    ensureDirs(p);
-
-    // Dedupe across /reload and resume: if this branch already carries a
-    // memory-context message, do not inject another (stale-but-stable beats
-    // duplicated blocks; mid-session writes are visible in the transcript).
-    const alreadyInjected = ctx.sessionManager
-      .getBranch()
-      .some((entry) => (entry as { customType?: string }).customType === MEMORY_CONTEXT_TYPE);
-    if (alreadyInjected) return;
-
+  /**
+   * Read the current memory files and render the block, or null when there is
+   * nothing to say. Called fresh each time rather than caching the rendered
+   * text: a `memory_write` earlier in the session should be part of what
+   * survives the compaction that follows it.
+   */
+  async function currentBlock(ctx: ExtensionContext, p: MemoryPaths): Promise<string | null> {
     // `.pi/memory/MEMORY.md` is shipped by the repository, and this block is
     // injected before your first prompt in every session — a repo you had just
     // cloned would otherwise get to put text in front of the model on its own
@@ -276,7 +285,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
         .flatMap((doc) => extractLessons(doc.file, doc.content)),
     );
 
-    const block = buildInjectBlock({
+    return buildInjectBlock({
       globalMemory: readFileSafe(p.globalMemory),
       projectMemory: projectTrusted ? readFileSafe(p.projectMemory) : null,
       today: readFileSafe(dailyFile(p.dailyDir, localDateStr())),
@@ -284,6 +293,42 @@ export default function memoryExtension(pi: ExtensionAPI) {
       dailyDates: listDailyFiles(p).map((f) => f.replace(/\.md$/, "")),
       lessons: lessonsBlock(lessons),
     });
+  }
+
+  pi.on("session_start", async (_event, ctx) => {
+    const p = requirePaths(ctx);
+    ensureDirs(p);
+
+    // Dedupe across /reload and resume — against the entries the model can
+    // actually see, not the raw branch. Those two lists diverge the moment a
+    // compaction happens: the folded block stays on the branch forever while
+    // disappearing from the conversation, and checking the branch would let a
+    // resumed session start with no memory and believe it had some.
+    if (isInjectedInContext(ctx.sessionManager.buildContextEntries(), MEMORY_CONTEXT_TYPE)) return;
+
+    const block = await currentBlock(ctx, p);
+    if (block) {
+      pi.sendMessage({ customType: MEMORY_CONTEXT_TYPE, content: block, display: false });
+    }
+  });
+
+  /**
+   * Compaction keeps the most recent `keepRecentTokens` and folds everything
+   * older into a summary. The memory block is injected once before the first
+   * prompt, which makes it the oldest entry in the session and guaranteed to
+   * be in the folded region — so without this, memory lasts until the first
+   * compaction and then quietly goes missing for the rest of the session.
+   *
+   * Re-attaching it is deliberately the whole fix. No model is called here:
+   * this package's promise is that memory is never rewritten by a surprise
+   * summarisation, and a compaction is exactly the moment that promise is
+   * most tempting to break. pi's own summariser still writes the summary; we
+   * only put the user's own bytes back in front of it.
+   */
+  pi.on("session_compact", async (_event, ctx) => {
+    const p = requirePaths(ctx as ExtensionContext);
+    if (isInjectedInContext(ctx.sessionManager.buildContextEntries(), MEMORY_CONTEXT_TYPE)) return;
+    const block = await currentBlock(ctx as ExtensionContext, p);
     if (block) {
       pi.sendMessage({ customType: MEMORY_CONTEXT_TYPE, content: block, display: false });
     }

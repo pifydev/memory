@@ -26,6 +26,25 @@ function cap(text: string, max: number): string {
 }
 
 /**
+ * Is the memory block still in front of the model?
+ *
+ * The distinction this exists for: pi's session branch and pi's *context* are
+ * not the same list. `getBranch()` returns every entry on the path, including
+ * ones a compaction has already folded away; `buildContextEntries()` returns
+ * what is actually sent. Compaction keeps only the most recent
+ * `keepRecentTokens` and replaces everything older with a summary — and the
+ * memory block, injected once before the first prompt, is the oldest entry
+ * there is. It is always in the folded region.
+ *
+ * So asking the branch "have I injected?" answers a question nobody asked.
+ * After a compaction the honest answer is no: the entry exists in history and
+ * is gone from the conversation.
+ */
+export function isInjectedInContext(contextEntries: readonly unknown[], customType: string): boolean {
+  return contextEntries.some((entry) => (entry as { customType?: string })?.customType === customType);
+}
+
+/**
  * Memory content is data, and it goes inside a tagged block that tells the
  * model exactly that. A line reading `</memory>` in a memory file would end
  * the block early, and everything after it would arrive looking like the
