@@ -57,7 +57,9 @@ function run(label, trusted) {
       "--no-extensions",
       "-e", probe,
       "-e", join(PKG, "extensions", "memory.ts"),
-      "-p", "Reply with the single word OK.",
+      // Wrapped: unquoted sentences reach pi one prompt per word on Windows
+      // under shell:true (see task/test/live/sweep-wire.mjs).
+      "-p", '"Reply with the single word OK."',
     ];
     spawnSync("pi", args, {
       cwd: repo,

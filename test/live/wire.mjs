@@ -69,7 +69,9 @@ try {
         "--no-extensions",
         "-e", probe,
         "-e", join(PKG, "extensions", "memory.ts"),
-        "-p", prompt,
+        // Wrapped and escaped: unquoted sentences reach pi one prompt per
+        // word on Windows under shell:true (see task/test/live/sweep-wire.mjs).
+        "-p", '"' + prompt.replace(/"/g, '\\"') + '"',
       ],
       {
         cwd: repo,
