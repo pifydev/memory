@@ -63,7 +63,7 @@ Notes ride along inside the memory block, which means they arrive exactly when t
 
 Every note is **secret-scanned** before it is recorded. An observer reads the raw transcript, which is where a pasted key lives, and a note is re-injected into every request after a compaction — one leaked credential would be laundered from a single message into all of them.
 
-**Honest status:** measured live on `openai/gpt-5.6` and `qwen3-235b`, which both record the stated rule correctly (`test/live/observe-wire.mjs`, 5/5 each). `anthropic/claude-opus-5` returns no text at all through this path; the run then fails loudly and `/memory` says so, rather than advancing silently and taking no notes for the rest of the session.
+**Honest status:** measured live on `openai/gpt-5.6` and `qwen3-235b`, which both record the stated rule correctly (`test/live/observe-wire.mjs`, 5/5 each). `anthropic/claude-opus-5` via openrouter returns no text through this path — root cause found by A/B in pi's source: pi's model catalog marks that model `supportsMidConvoEffort`, which adds beta headers and `output_config` marker messages that openrouter's anthropic passthrough cannot digest, and the reply comes back empty. Confirmed: 0 chars without an override, a normal answer with `providers.openrouter.modelOverrides["anthropic/claude-opus-5"].compat.supportsMidConvoEffort = false` in `~/.pi/agent/models.json`. Until pi fixes the catalog, that override is the fix; without it the run still fails loudly and `/memory` says so rather than advancing silently.
 
 ## Consolidation you asked for
 
