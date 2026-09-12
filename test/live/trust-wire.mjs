@@ -27,11 +27,21 @@ const PROBE_SOURCE = [
   "export default function probe(pi) {",
   '  pi.on("before_provider_request", (event) => {',
   "    const payload = event.payload || {};",
-  "    const messages = JSON.stringify(payload.messages || []);",
-  "    const system = JSON.stringify(payload.system || payload.systemPrompt || '');",
+  "    const msgs = payload.messages || [];",
+  "    const messages = JSON.stringify(msgs);",
+  // On the openrouter/openai path there is NO top-level system key — the
+  // system prompt is messages[0] with role "system". Reading payload.system
+  // alone made inSystem structurally always false, and the "not in the
+  // system prompt" check below passed no matter what the extension did:
+  // a fail-open assertion measuring nothing. sysLen is recorded so the
+  // assertion can prove it actually read a non-empty prompt.
+  "    const first = msgs.find((m) => m && m.role === 'system');",
+  "    const c = first ? first.content : (payload.system || payload.systemPrompt || '');",
+  "    const system = typeof c === 'string' ? c : JSON.stringify(c || '');",
   "    appendFileSync(process.env.TRUST_OUT, JSON.stringify({",
   "      inMessages: messages.includes(process.env.TRUST_MARKER),",
   "      inSystem: system.includes(process.env.TRUST_MARKER),",
+  "      sysLen: system.length,",
   "    }) + String.fromCharCode(10));",
   "  });",
   "}",
@@ -85,10 +95,11 @@ function run(label, trusted) {
       requests: requests.length,
       inMessages: requests.some((r) => r.inMessages),
       inSystem: requests.some((r) => r.inSystem),
+      sysLen: Math.max(0, ...requests.map((r) => r.sysLen ?? 0)),
     };
   } finally {
-    rmSync(home, { recursive: true, force: true });
-    rmSync(repo, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmSync(repo, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   }
 }
 
@@ -110,7 +121,10 @@ check(
 const trusted = run("trusted", true);
 console.log(`trusted:   ${JSON.stringify(trusted)}`);
 check("a project the user approved does reach the model", trusted.inMessages);
-check("and it does not go into the system prompt", !trusted.inSystem);
+// Two halves, because "not in the system prompt" proves nothing when the
+// probe never saw a system prompt: the assertion must first show it read one.
+check("the probe actually read a system prompt", trusted.sysLen > 0, `${trusted.sysLen} chars`);
+check("and memory does not go into it", !trusted.inSystem);
 
 console.log(`${NL}${passed}/${passed + failed} passed`);
 process.exitCode = failed === 0 ? 0 : 1;

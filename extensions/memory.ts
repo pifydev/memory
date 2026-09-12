@@ -359,8 +359,9 @@ export default function memoryExtension(pi: ExtensionAPI) {
     }
   }
 
-  function currentNotes(ctx: ExtensionContext): Observation[] {
-    return replayObservations(ctx.sessionManager.getBranch() as never).notes;
+  function currentNotes(ctx: ExtensionContext): { notes: Observation[]; dropped: number } {
+    const replayed = replayObservations(ctx.sessionManager.getBranch() as never);
+    return { notes: replayed.notes, dropped: replayed.dropped };
   }
 
   /**
@@ -511,7 +512,12 @@ export default function memoryExtension(pi: ExtensionAPI) {
       // Notes are the part that earns its tokens only once the conversation
       // they describe has been folded away. Before that the transcript is
       // still right there and including them would say everything twice.
-      notes: options.withNotes ? renderObservations(currentNotes(ctx)) : null,
+      notes: options.withNotes
+        ? (() => {
+            const { notes, dropped } = currentNotes(ctx);
+            return renderObservations(notes, dropped);
+          })()
+        : null,
     });
   }
 
@@ -701,7 +707,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
   // ── Command ──────────────────────────────────────────────────────────
 
   pi.registerCommand("memory", {
-    description: "Memory: /memory [search <query> | read <target> | consolidate <target> | notes | observe on|off]",
+    description: "Memory: /memory [search <query> | read <target> | consolidate <target> | restore <id> | notes | observe on|off]",
     handler: async (args, ctx) => {
       if (!ctx.hasUI) return;
       const p = requirePaths(ctx);
@@ -747,18 +753,39 @@ export default function memoryExtension(pi: ExtensionAPI) {
         return;
       }
       if (/^notes$/i.test(trimmed)) {
-        const notes = currentNotes(ctx);
+        const { notes, dropped } = currentNotes(ctx);
         ctx.ui.notify(
           notes.length === 0
             ? observeAllowed(ctx)
               ? "No session notes yet. They are recorded in the background as the conversation grows."
               : "Session notes are off for this project. Turn them on with /memory observe on."
             : [
-                `${notes.length} session note(s) — kept past compaction, never written to your files:`,
+                `${notes.length} session note(s) — kept past compaction, never written to your files:` +
+                  (dropped > 0 ? ` (${dropped} older dropped at the cap)` : ""),
                 ...notes.map((n) => `  [${n.category}] ${n.text}`),
               ].join("\n"),
           "info",
         );
+        return;
+      }
+
+      // The undo path this package's own notices advertise. The tool existed;
+      // the command route it pointed at did not — "/memory restore <id>" fell
+      // through to the usage warning and restored nothing, which for an undo
+      // is the worst possible answer at the worst possible moment.
+      const restoreMatch = /^restore\s+(\S+)$/i.exec(trimmed);
+      if (restoreMatch) {
+        try {
+          const restored = restore(p, restoreMatch[1]!.trim());
+          ctx.ui.notify(
+            restored > 0
+              ? `Restored ${restored} entr${restored > 1 ? "ies" : "y"}.`
+              : `Nothing restored — no recovery record named "${restoreMatch[1]}".`,
+            restored > 0 ? "info" : "warning",
+          );
+        } catch (err) {
+          ctx.ui.notify(`Restore failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+        }
         return;
       }
 
@@ -787,7 +814,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
       }
       if (trimmed) {
         ctx.ui.notify(
-          "Usage: /memory [search <query> | read <global|project|list|YYYY-MM-DD> | consolidate <global|project|YYYY-MM-DD> | notes | observe on|off]",
+          "Usage: /memory [search <query> | read <global|project|list|YYYY-MM-DD> | consolidate <global|project|YYYY-MM-DD> | restore <id> | notes | observe on|off]",
           "warning",
         );
         return;
@@ -811,7 +838,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
           `  notes    ${
             observeAllowed(ctx)
               ? (() => {
-                  const notes = currentNotes(ctx);
+                  const { notes } = currentNotes(ctx);
                   const mix = countByCategory(notes)
                     .map(([category, n]) => `${n} ${category}`)
                     .join(", ");

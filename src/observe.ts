@@ -211,6 +211,8 @@ interface BranchEntryLike {
 export function replayObservations(branch: readonly unknown[]): {
   notes: Observation[];
   coversUpToId: string | null;
+  /** Notes beyond the cap, dropped oldest-first — reported, never silent. */
+  dropped: number;
 } {
   const notes: Observation[] = [];
   let coversUpToId: string | null = null;
@@ -228,8 +230,12 @@ export function replayObservations(branch: readonly unknown[]): {
       notes.push({ category: note.category, text: note.text.slice(0, MAX_NOTE_CHARS) });
     }
   }
-  // Keep the newest when a very long session has accumulated more than the cap.
-  return { notes: notes.slice(-MAX_NOTES_KEPT), coversUpToId };
+  // Keep the newest when a very long session has accumulated more than the
+  // cap — and say how many fell off, because the rendered block calls these
+  // notes "verbatim" and a silent cap under that label loses corrections
+  // without anyone being told.
+  const dropped = Math.max(0, notes.length - MAX_NOTES_KEPT);
+  return { notes: notes.slice(-MAX_NOTES_KEPT), coversUpToId, dropped };
 }
 
 /**
@@ -325,11 +331,16 @@ export function charsSinceCoverage(
 }
 
 /** The section that rides along with the memory block. */
-export function renderObservations(notes: readonly Observation[]): string | null {
+export function renderObservations(notes: readonly Observation[], dropped = 0): string | null {
   if (notes.length === 0) return null;
   return [
     "## Notes from earlier in this session",
     "Recorded as the conversation happened, before it was summarised. Verbatim, not re-summarised.",
+    // A silent cap under a "verbatim" label loses corrections without anyone
+    // being told; the drop is stated where the survivors are read.
+    ...(dropped > 0
+      ? [`(${dropped} older note${dropped === 1 ? "" : "s"} dropped at the ${MAX_NOTES_KEPT}-note cap — gone, not summarised.)`]
+      : []),
     ...notes.map((n) => `- [${n.category}] ${n.text}`),
   ].join("\n");
 }

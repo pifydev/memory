@@ -126,8 +126,8 @@ try {
   );
   check("the system prompt is not empty", systemOf(a).length > 100, `${systemOf(a).length} chars`);
 } finally {
-  rmSync(home, { recursive: true, force: true });
-  rmSync(repo, { recursive: true, force: true });
+  rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  rmSync(repo, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 }
 
 const passed = results.filter(Boolean).length;

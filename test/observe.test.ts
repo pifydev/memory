@@ -150,10 +150,11 @@ test("replay folds note entries and survives junk", () => {
     { id: "y", parentId: "x", type: "custom_message", customType: OBSERVATION_TYPE, data: { notes: "not an array" } },
     note("n2", "y", [{ category: "bogus", text: "dropped" }, { category: "insight", text: "two" }], "e5"),
   ];
-  const { notes, coversUpToId } = replayObservations(branch);
+  const { notes, coversUpToId, dropped } = replayObservations(branch);
   assert.deepEqual(notes.map((n) => n.text), ["one", "two"]);
   assert.equal(coversUpToId, "e5");
-  assert.deepEqual(replayObservations([]), { notes: [], coversUpToId: null });
+  assert.equal(dropped, 0);
+  assert.deepEqual(replayObservations([]), { notes: [], coversUpToId: null, dropped: 0 });
 });
 
 test("an empty run still advances coverage, so silence is not re-bought", () => {
@@ -162,6 +163,24 @@ test("an empty run still advances coverage, so silence is not re-bought", () => 
   const { notes, coversUpToId } = replayObservations(branch);
   assert.deepEqual(notes, []);
   assert.equal(coversUpToId, "e9");
+});
+
+test("the cap is reported where the survivors are read, never silent", () => {
+  // 45 notes across entries: 40 kept, and the block must say 5 fell off —
+  // it calls the survivors "verbatim", and a silent cap under that label
+  // loses corrections without anyone being told.
+  const many = Array.from({ length: 45 }, (_, i) => ({ category: "insight", text: `note number ${i}` }));
+  const branch = [note("n1", null, many, "e1")];
+  const { notes, dropped } = replayObservations(branch);
+  assert.equal(notes.length, 40);
+  assert.equal(dropped, 5);
+  // Newest kept: the first five are the ones gone.
+  assert.equal(notes[0]!.text, "note number 5");
+  const text = renderObservations(notes, dropped)!;
+  assert.match(text, /5 older notes dropped at the 40-note cap/);
+  assert.match(text, /gone, not summarised/);
+  // And a list under the cap says nothing about caps.
+  assert.equal(/dropped at the/.test(renderObservations(notes.slice(0, 3), 0)!), false);
 });
 
 test("the rendered section says what the notes are and are not", () => {
