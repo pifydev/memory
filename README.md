@@ -50,6 +50,21 @@ Recent **failures and corrections are recalled unprompted** at the start of late
 - **Undoable forgetting.** `memory_forget` writes a recovery record before deleting and reports the id; `memory_restore <id>` puts the entries back.
 - **Real search, zero dependencies.** BM25 full-text search through SQLite FTS5 via `node:sqlite`, built into Node 24+ and Bun. On Node 22 hosts it falls back silently to an in-process paragraph scan. Either way `memory_search` works out of the box, with nothing to install.
 
+## Session notes, if you turn them on
+
+`/memory observe on` starts a background note-taker. Every few thousand characters of new conversation, a model reads the stretch it has not seen and records what would be expensive to rediscover — an approach that was tried and abandoned, a correction, a rule stated once in passing — in the same categories as lessons. `/memory notes` shows them.
+
+Two boundaries make this safe enough to ship in a package built on not being a black box:
+
+- **It never writes to your files.** Notes are branch-local session entries. `MEMORY.md` and the daily logs are still written only when you ask, or when the agent records a lesson with `memory_write`. Notes live and die with the session; promoting one to durable memory is a thing you do, not a thing that happens.
+- **It is off until you turn it on**, per project. Turning it on is the sanction. `PIFY_MEMORY_OBSERVE=1` for headless runs, `PIFY_MEMORY_OBSERVE_AFTER_CHARS` to change the cadence.
+
+Notes ride along inside the memory block, which means they arrive exactly when they are worth their tokens — [after a compaction](#it-survives-compaction) has folded away the conversation they came from. Before that the transcript is still there and the notes would be saying it twice.
+
+Every note is **secret-scanned** before it is recorded. An observer reads the raw transcript, which is where a pasted key lives, and a note is re-injected into every request after a compaction — one leaked credential would be laundered from a single message into all of them.
+
+**Honest status:** measured live on `openai/gpt-5.6` and `qwen3-235b`, which both record the stated rule correctly (`test/live/observe-wire.mjs`, 5/5 each). `anthropic/claude-opus-5` returns no text at all through this path; the run then fails loudly and `/memory` says so, rather than advancing silently and taking no notes for the rest of the session.
+
 ## Consolidation you asked for
 
 `/memory consolidate <global|project|YYYY-MM-DD>` hands the file to a model that merges duplicates and drops facts a later entry already corrected.
@@ -58,7 +73,9 @@ It only ever *proposes*. The result is refused outright if it invents an entry a
 
 ## Command
 
-`/memory` — status: file paths, sizes, and which search engine is active.
+`/memory` — status: file paths, sizes, which search engine is active, and whether session notes are on.
+`/memory observe on|off` — turn session note-taking on or off for this project.
+`/memory notes` — what this session has noted so far.
 `/memory search <query>` — search yourself, without going through the agent.
 `/memory read <global|project|list|YYYY-MM-DD>` — print a memory file.
 `/memory consolidate <global|project|YYYY-MM-DD>` — propose a merged, de-duplicated file.

@@ -59,7 +59,22 @@ import {
 import { dailyFile, localDateStr, resolvePaths, yesterdayStr } from "../src/paths.ts";
 import { ftsAvailable } from "../src/fts.ts";
 import { searchMemory } from "../src/search.ts";
-import { assertNoSecrets } from "../src/secrets.ts";
+import { assertNoSecrets, scanForSecrets } from "../src/secrets.ts";
+import {
+  OBSERVATION_TYPE,
+  OBSERVE_SYSTEM_PROMPT,
+  buildObservePrompt,
+  charsSinceCoverage,
+  countByCategory,
+  observeAfterChars,
+  dedupeObservations,
+  parseObservations,
+  renderObservations,
+  replayObservations,
+  shouldObserve,
+  sliceTranscript,
+  type Observation,
+} from "../src/observe.ts";
 import {
   allMemoryFiles,
   appendEntry,
@@ -74,6 +89,9 @@ import type { MemoryPaths, MemoryScope } from "../src/types.ts";
 
 const MEMORY_CONTEXT_TYPE = "memory-context";
 const CONSOLIDATE_TIMEOUT_MS = 180_000;
+const OBSERVE_TIMEOUT_MS = 120_000;
+/** Entry kinds the observer must not read: its own output and its own block. */
+const OBSERVER_BLIND_TO = [MEMORY_CONTEXT_TYPE, OBSERVATION_TYPE];
 /** Below this, consolidation cannot pay for its own model call. */
 const MIN_ENTRIES_TO_CONSOLIDATE = 4;
 
@@ -134,6 +152,57 @@ export default function memoryExtension(pi: ExtensionAPI) {
     return approved;
   }
 
+  /**
+   * The model's answer, from the last assistant message that actually has
+   * text in it.
+   *
+   * Not simply the last assistant message: a thinking model's final message
+   * can carry only reasoning blocks, and taking it yields an empty answer
+   * with no error to explain it. Measured on anthropic/claude-opus-5, which
+   * returned 0 characters this way while openai/gpt-5.6 returned the note.
+   */
+  function answerText(session: AgentSession): string {
+    const messages = session.messages as Array<{
+      role?: string;
+      content?: Array<{ type?: string; text?: string }>;
+    }>;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i];
+      if (message?.role !== "assistant") continue;
+      const text = (message.content ?? [])
+        .filter((part) => part.type === "text" && typeof part.text === "string")
+        .map((part) => part.text)
+        .join("")
+        .trim();
+      if (text) return text;
+    }
+    return "";
+  }
+
+  /**
+   * A resource loader that has actually loaded.
+   *
+   * `createAgentSession` only calls `reload()` on a loader it creates itself;
+   * one passed in is used exactly as handed over, and a freshly constructed
+   * `DefaultResourceLoader` has an empty `appendSystemPrompt` until it loads.
+   * So a system prompt supplied this way is silently dropped — the call
+   * succeeds, the model answers, and it answers without its instructions.
+   * Measured: with a loader that appends "begin every reply with BANANA", the
+   * reply began with BANANA only after `reload()`.
+   */
+  async function loadedResourceLoader(cwd: string, systemPrompt: string): Promise<DefaultResourceLoader> {
+    const loader = new DefaultResourceLoader({
+      cwd,
+      agentDir: getAgentDir(),
+      noExtensions: true,
+      noPromptTemplates: true,
+      noThemes: true,
+      appendSystemPrompt: [systemPrompt],
+    } as never);
+    await loader.reload();
+    return loader;
+  }
+
   function loadDocs(p: MemoryPaths) {
     return allMemoryFiles(p)
       .map((file) => ({ file, content: readFileSafe(file) ?? "" }))
@@ -182,25 +251,13 @@ export default function memoryExtension(pi: ExtensionAPI) {
         model: ctx.model as never,
         // No tools: this is a pure text transformation of content we hand it.
         tools: [],
-        resourceLoader: new DefaultResourceLoader({
-          cwd: ctx.cwd,
-          agentDir: getAgentDir(),
-          noExtensions: true,
-          noPromptTemplates: true,
-          noThemes: true,
-          appendSystemPrompt: [CONSOLIDATE_SYSTEM_PROMPT],
-        } as never),
+        resourceLoader: await loadedResourceLoader(ctx.cwd, CONSOLIDATE_SYSTEM_PROMPT),
       });
       session = created.session;
       await session.prompt(buildConsolidatePrompt(target, before), {
         signal: AbortSignal.timeout(CONSOLIDATE_TIMEOUT_MS),
       } as never);
-      const messages = session.messages as Array<{ role?: string; content?: Array<{ type?: string; text?: string }> }>;
-      const last = [...messages].reverse().find((m) => m.role === "assistant");
-      answer = (last?.content ?? [])
-        .filter((part) => part.type === "text" && typeof part.text === "string")
-        .map((part) => part.text)
-        .join("");
+      answer = answerText(session);
     } catch (err) {
       ctx.ui.notify(`Consolidation failed: ${err instanceof Error ? err.message : String(err)}`, "error");
       return;
@@ -263,13 +320,165 @@ export default function memoryExtension(pi: ExtensionAPI) {
 
   // ── Injection: once per session, hidden, before any user message ─────
 
+  // ── Session notes: the observer ──────────────────────────────────────
+
+  /** True while a run is in flight, so turns cannot stack observers. */
+  let observing = false;
+  /** Why the last run failed, so /memory can say so instead of staying blank. */
+  let lastObserveError: string | null = null;
+  /** Per-project switch, memoised for the session. */
+  let observeEnabled: boolean | null = null;
+
+  function observeAllowed(ctx: ExtensionContext): boolean {
+    if (observeEnabled !== null) return observeEnabled;
+    const env = envConsent({ PIFY_TRUST_PROJECT: process.env.PIFY_MEMORY_OBSERVE });
+    if (env !== undefined) {
+      observeEnabled = env;
+      return observeEnabled;
+    }
+    // Off unless this project was switched on. No remembered answer means no.
+    observeEnabled = readConsent(parseConsent(readFileSafe(consentFile())), ctx.cwd, "observe") === true;
+    return observeEnabled;
+  }
+
+  function setObserveAllowed(ctx: ExtensionContext, enabled: boolean): void {
+    observeEnabled = enabled;
+    const file = consentFile();
+    const store = parseConsent(readFileSafe(file));
+    try {
+      writeFileSync(file, `${JSON.stringify(writeConsent(store, ctx.cwd, "observe", enabled), null, 2)}\n`);
+    } catch {
+      // An unwritable store costs the memory of the answer, not the answer.
+    }
+  }
+
+  function currentNotes(ctx: ExtensionContext): Observation[] {
+    return replayObservations(ctx.sessionManager.getBranch() as never).notes;
+  }
+
+  /**
+   * Record what this slice of the conversation knew.
+   *
+   * Runs in the background off `agent_end`: nothing waits for it, and a run
+   * that fails leaves the coverage marker where it was so the next one sees a
+   * larger slice rather than a hole. Notes go to the branch ledger only —
+   * `MEMORY.md` and the daily logs are still written only when asked.
+   */
+  async function observe(input: {
+    cwd: string;
+    model: unknown;
+    existing: readonly Observation[];
+    slice: { text: string; upToId: string | null };
+  }): Promise<void> {
+    const { cwd, model, existing, slice } = input;
+    if (!slice.text.trim() || !slice.upToId) return;
+
+    let session: AgentSession | null = null;
+    let answer = "";
+    try {
+      const created = await createAgentSession({
+        sessionManager: SessionManager.inMemory(cwd),
+        model: model as never,
+        // Note-taking does not need extended thinking, and paying for it on
+        // every slice of every session is the wrong default for a background
+        // job. (Tried as a fix for the empty answers from claude-opus-5 too;
+        // it is not one — that model still returns no text through this path.)
+        thinkingLevel: "off",
+        // No tools: the observer reads what it is given and writes lines.
+        tools: [],
+        resourceLoader: await loadedResourceLoader(cwd, OBSERVE_SYSTEM_PROMPT),
+      });
+      session = created.session;
+      await session.prompt(buildObservePrompt(slice.text, existing), {
+        signal: AbortSignal.timeout(OBSERVE_TIMEOUT_MS),
+      } as never);
+      answer = answerText(session);
+    } finally {
+      try {
+        session?.dispose();
+      } catch {
+        // best-effort
+      }
+    }
+
+    // An answer of nothing at all is not the same as a considered "NONE".
+    // Some models return only reasoning blocks through this path and no text
+    // — measured on anthropic/claude-opus-5, which answered 0 characters
+    // where openai/gpt-5.6 and qwen3-235b both returned a note. Treating that
+    // as deliberate silence would advance coverage over conversation nobody
+    // ever read, and the session would quietly take no notes for its whole
+    // life with nothing to show why. So it fails loudly and retries later.
+    if (!answer.trim()) {
+      throw new Error("the observer model returned no text");
+    }
+
+    // An observer reads the raw transcript, which is exactly where a pasted
+    // key lives. A note is re-injected into every request after a compaction,
+    // so a leaked credential would be laundered from one message into all of
+    // them. Drop the note, keep the rest, never write the secret anywhere.
+    const fresh = dedupeObservations(existing, parseObservations(answer)).filter(
+      (note) => scanForSecrets(note.text).length === 0,
+    );
+
+    // Coverage advances even when nothing was worth recording: the slice was
+    // read, and re-reading it every turn would spend a model call to reach
+    // the same silence.
+    pi.appendEntry(OBSERVATION_TYPE, { notes: fresh, coversUpToId: slice.upToId });
+  }
+
+  pi.on("agent_end", async (_event, ctx) => {
+    const uiCtx = ctx as ExtensionContext;
+    if (!observeAllowed(uiCtx)) return;
+    const branch = uiCtx.sessionManager.getBranch() as never as unknown[];
+    const { notes: existing, coversUpToId } = replayObservations(branch);
+    if (
+      !shouldObserve({
+        enabled: true,
+        inFlight: observing,
+        charsSinceCoverage: charsSinceCoverage(branch, coversUpToId, OBSERVER_BLIND_TO),
+        threshold: observeAfterChars(process.env),
+      })
+    ) {
+      return;
+    }
+
+    // Everything the run needs is read here, synchronously, and handed over
+    // as plain values. A background task must not keep the event's `ctx`:
+    // a compaction replaces the session underneath it, and the next property
+    // access throws "this extension ctx is stale". Which is exactly what
+    // happened — the observer ran, failed on its first ctx read, and left no
+    // trace but a silent catch.
+    const captured = {
+      cwd: uiCtx.cwd,
+      model: uiCtx.model,
+      existing,
+      slice: sliceTranscript(branch, coversUpToId, OBSERVER_BLIND_TO),
+    };
+
+    observing = true;
+    lastObserveError = null;
+    // Not awaited: a turn must never wait on note-taking.
+    void observe(captured)
+      .catch((err) => {
+        lastObserveError = err instanceof Error ? err.message : String(err);
+        // A failed run leaves coverage alone; the next one sees more.
+      })
+      .finally(() => {
+        observing = false;
+      });
+  });
+
   /**
    * Read the current memory files and render the block, or null when there is
    * nothing to say. Called fresh each time rather than caching the rendered
    * text: a `memory_write` earlier in the session should be part of what
    * survives the compaction that follows it.
    */
-  async function currentBlock(ctx: ExtensionContext, p: MemoryPaths): Promise<string | null> {
+  async function currentBlock(
+    ctx: ExtensionContext,
+    p: MemoryPaths,
+    options: { withNotes?: boolean } = {},
+  ): Promise<string | null> {
     // `.pi/memory/MEMORY.md` is shipped by the repository, and this block is
     // injected before your first prompt in every session — a repo you had just
     // cloned would otherwise get to put text in front of the model on its own
@@ -292,6 +501,10 @@ export default function memoryExtension(pi: ExtensionAPI) {
       yesterday: readFileSafe(dailyFile(p.dailyDir, yesterdayStr())),
       dailyDates: listDailyFiles(p).map((f) => f.replace(/\.md$/, "")),
       lessons: lessonsBlock(lessons),
+      // Notes are the part that earns its tokens only once the conversation
+      // they describe has been folded away. Before that the transcript is
+      // still right there and including them would say everything twice.
+      notes: options.withNotes ? renderObservations(currentNotes(ctx)) : null,
     });
   }
 
@@ -306,7 +519,10 @@ export default function memoryExtension(pi: ExtensionAPI) {
     // resumed session start with no memory and believe it had some.
     if (isInjectedInContext(ctx.sessionManager.buildContextEntries(), MEMORY_CONTEXT_TYPE)) return;
 
-    const block = await currentBlock(ctx, p);
+    // A resumed session may already carry notes from before a compaction, so
+    // they come along here too. At session start this costs no cache: the
+    // block is injected once, before anything is cached.
+    const block = await currentBlock(ctx, p, { withNotes: true });
     if (block) {
       pi.sendMessage({ customType: MEMORY_CONTEXT_TYPE, content: block, display: false });
     }
@@ -328,7 +544,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
   pi.on("session_compact", async (_event, ctx) => {
     const p = requirePaths(ctx as ExtensionContext);
     if (isInjectedInContext(ctx.sessionManager.buildContextEntries(), MEMORY_CONTEXT_TYPE)) return;
-    const block = await currentBlock(ctx as ExtensionContext, p);
+    const block = await currentBlock(ctx as ExtensionContext, p, { withNotes: true });
     if (block) {
       pi.sendMessage({ customType: MEMORY_CONTEXT_TYPE, content: block, display: false });
     }
@@ -470,7 +686,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
   // ── Command ──────────────────────────────────────────────────────────
 
   pi.registerCommand("memory", {
-    description: "Memory: /memory [search <query> | read <target> | consolidate <target>]",
+    description: "Memory: /memory [search <query> | read <target> | consolidate <target> | notes | observe on|off]",
     handler: async (args, ctx) => {
       if (!ctx.hasUI) return;
       const p = requirePaths(ctx);
@@ -492,6 +708,42 @@ export default function memoryExtension(pi: ExtensionAPI) {
       const consolidateMatch = /^consolidate(?:\s+(\S+))?$/i.exec(trimmed);
       if (consolidateMatch) {
         await runConsolidate(ctx, p, (consolidateMatch[1] ?? "global").toLowerCase());
+        return;
+      }
+
+      // v0.8: session notes.
+      const observeMatch = /^observe(?:\s+(on|off))?$/i.exec(trimmed);
+      if (observeMatch) {
+        const arg = observeMatch[1]?.toLowerCase();
+        if (arg === "on" || arg === "off") {
+          setObserveAllowed(ctx, arg === "on");
+          ctx.ui.notify(
+            arg === "on"
+              ? "Session notes ON for this project. A background model call reads each new stretch of the conversation and records what would be expensive to rediscover. Notes go to this session only — your memory files are never written without you."
+              : "Session notes OFF for this project.",
+            "info",
+          );
+          return;
+        }
+        ctx.ui.notify(
+          `Session notes are ${observeAllowed(ctx) ? "ON" : "OFF"} for this project. Use /memory observe on|off.`,
+          "info",
+        );
+        return;
+      }
+      if (/^notes$/i.test(trimmed)) {
+        const notes = currentNotes(ctx);
+        ctx.ui.notify(
+          notes.length === 0
+            ? observeAllowed(ctx)
+              ? "No session notes yet. They are recorded in the background as the conversation grows."
+              : "Session notes are off for this project. Turn them on with /memory observe on."
+            : [
+                `${notes.length} session note(s) — kept past compaction, never written to your files:`,
+                ...notes.map((n) => `  [${n.category}] ${n.text}`),
+              ].join("\n"),
+          "info",
+        );
         return;
       }
 
@@ -520,7 +772,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
       }
       if (trimmed) {
         ctx.ui.notify(
-          "Usage: /memory [search <query> | read <global|project|list|YYYY-MM-DD> | consolidate <global|project|YYYY-MM-DD>]",
+          "Usage: /memory [search <query> | read <global|project|list|YYYY-MM-DD> | consolidate <global|project|YYYY-MM-DD> | notes | observe on|off]",
           "warning",
         );
         return;
@@ -541,6 +793,17 @@ export default function memoryExtension(pi: ExtensionAPI) {
               : " — NOT injected: you have not approved this project's memory"),
           `  daily    ${dailies.length} log(s) in ${p.dailyDir}`,
           `  search   ${engine}`,
+          `  notes    ${
+            observeAllowed(ctx)
+              ? (() => {
+                  const notes = currentNotes(ctx);
+                  const mix = countByCategory(notes)
+                    .map(([category, n]) => `${n} ${category}`)
+                    .join(", ");
+                  return `on — ${notes.length} this session${mix ? ` (${mix})` : ""}`;
+                })()
+              : "off — /memory observe on"
+          }${lastObserveError ? "\n           last run failed: " + lastObserveError : ""}`,
           "Tools: memory_write · memory_read · memory_search · memory_forget · memory_restore",
         ].join("\n"),
         "info",

@@ -18,6 +18,12 @@ export interface InjectInput {
   dailyDates: string[];
   /** Recalled lessons block (v0.5), already rendered. */
   lessons?: string | null;
+  /**
+   * Session notes (v0.8), already rendered. Present only after a compaction
+   * has folded the conversation they came from — before that the conversation
+   * itself is still there and the notes would be saying it twice.
+   */
+  notes?: string | null;
 }
 
 function cap(text: string, max: number): string {
@@ -76,6 +82,7 @@ export function buildInjectBlock(input: InjectInput): string | null {
   }
 
   if (input.lessons?.trim()) sections.push(neutralizeBlockTags(input.lessons.trim()));
+  if (input.notes?.trim()) sections.push(neutralizeBlockTags(input.notes.trim()));
 
   const archived = input.dailyDates.length;
   if (archived > 2) {

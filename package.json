@@ -1,7 +1,7 @@
 {
   "name": "@pify/memory",
-  "version": "0.7.0",
-  "description": "Persistent memory across pi sessions: plain-markdown two-tier storage, FTS5 search via node:sqlite, secret-scanned writes, cache-stable injection",
+  "version": "0.8.0",
+  "description": "Persistent memory across pi sessions: plain-markdown two-tier storage, FTS5 search via node:sqlite, secret-scanned writes, cache-stable injection that survives compaction, opt-in session notes",
   "keywords": [
     "pi-package",
     "pi-extension",
