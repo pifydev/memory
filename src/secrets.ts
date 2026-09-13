@@ -22,6 +22,23 @@ const PATTERNS: Array<{ label: string; re: RegExp }> = [
     label: "assigned credential",
     re: /\b(api[_-]?key|secret|token|password|passwd)\b\s*[:=]\s*["']?[A-Za-z0-9+/_-]{16,}["']?/i,
   },
+  // An HTTP Authorization header, whatever the scheme — the shape you get by
+  // pasting a `curl -H` line or a captured request into a note. Anchored on
+  // the literal "authorization" so it never fires on prose that merely says
+  // "bearer" or "basic" (async-fork's redaction taught this leak path).
+  {
+    label: "authorization header",
+    re: /\bauthorization\b\s*[:=]\s*["']?(?:bearer|basic|token)\s+\S{8,}/i,
+  },
+  // A bare bearer token with no header around it. "bearer" plus a 24-char
+  // single token is a credential, not a sentence — "bearer of the news" and
+  // "bearer authentication docs" both fall short of the length, so precision
+  // holds. (Plain "basic" is too common a word to match unanchored.)
+  { label: "bearer token", re: /\bbearer\s+[A-Za-z0-9._~+/-]{24,}={0,2}/i },
+  // Credentials embedded in a URL: scheme://user:pass@host — git remotes,
+  // database connection strings, authenticated curl URLs. `://x:y@` never
+  // occurs in prose, so this is precise even though it blocks on save.
+  { label: "credentials in URL", re: /\b[a-z][a-z0-9+.-]*:\/\/[^\s:/?#@]+:[^\s:/?#@]+@\S+/i },
 ];
 
 export function scanForSecrets(text: string): SecretMatch[] {
