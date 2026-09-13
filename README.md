@@ -1,6 +1,6 @@
 # @pify/memory
 
-[![npm version](https://img.shields.io/npm/v/@pify/memory)](https://www.npmjs.com/package/@pify/memory) [![npm downloads](https://img.shields.io/npm/dm/@pify/memory)](https://www.npmjs.com/package/@pify/memory)
+[![CI](https://github.com/pifydev/memory/actions/workflows/ci.yml/badge.svg)](https://github.com/pifydev/memory/actions/workflows/ci.yml) [![npm version](https://img.shields.io/npm/v/@pify/memory)](https://www.npmjs.com/package/@pify/memory) [![npm downloads](https://img.shields.io/npm/dm/@pify/memory)](https://www.npmjs.com/package/@pify/memory)
 
 Persistent memory for [pi](https://github.com/earendil-works/pi): durable facts, project conventions, and a daily activity log — all plain markdown you can read, edit, and commit.
 
