@@ -199,7 +199,7 @@ test("a note carrying a credential is something the secret gate catches", () => 
   // key lives, and a note is re-injected into every request after a
   // compaction — so one leaked credential would be laundered from a single
   // message into all of them. The extension filters on this predicate.
-  const leaked = parseObservations("[tool-quirk] the deploy script needs AKIAIOSFODNN7EXAMPLE to run");
+  const leaked = parseObservations("[tool-quirk] the deploy script needs AKIA1234567890ABCDEF to run");
   assert.equal(leaked.length, 1);
   assert.ok(scanForSecrets(leaked[0]!.text).length > 0);
   const clean = parseObservations("[tool-quirk] the deploy script needs an AWS key in the environment");

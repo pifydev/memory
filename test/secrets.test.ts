@@ -4,17 +4,22 @@ import { assertNoSecrets, scanForSecrets } from "../src/secrets.ts";
 
 test("blocks the well-known credential shapes", () => {
   const samples: Array<[string, string]> = [
-    ["AWS access key", "key is AKIAIOSFODNN7EXAMPLE ok"],
+    ["AWS access key", "key is AKIA1234567890ABCDEF ok"],
     ["GitHub token", "ghp_abcdefghijklmnopqrstuvwxyz0123456789"],
     ["GitHub fine-grained token", "github_pat_11ABCDEFG0123456789abcdef"],
     ["Slack token", "xoxb-123456789012-abcdefghij"],
     ["OpenAI API key", "sk-abcdefghijklmnopqrstuvwx"],
     ["Google API key", `AIza${"Sy0-abcdefghijklmnopqrstuvwxyz01234".slice(0, 35)}`],
-    ["npm token", `npm_${"a".repeat(36)}`],
+    ["npm token", "npm_abcdef0123456789ghijkl0123456789mnop"],
     ["private key block", "-----BEGIN RSA PRIVATE KEY-----"],
     ["JWT", "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9P"],
     ["assigned credential", 'api_key = "abcdef0123456789abcdef"'],
-    ["authorization header", "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9xxxxxxxx"],
+    ["GitLab token", "glpat-abcdefghijklmnopqrstuvwx"],
+    ["Slack webhook", "https://hooks.slack.com/services/T00000000/B00000000/abcdefghijklmnopqrst"],
+    ["Stripe key", "sk_live_abcdefghijklmnop0123"],
+    ["SendGrid key", "SG.abcdefghijklmnop.qrstuvwxyz012345"],
+    ["Google OAuth secret", "GOCSPX-abcdefghijklmnopqrstuvwx"],
+    ["authorization header", "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9realtoken"],
     ["authorization header", "authorization = Basic dXNlcjpzdXBlcnNlY3JldA=="],
     ["bearer token", "bearer abcdefghijklmnopqrstuvwxyz012345"],
     ["credentials in URL", "clone https://user:ghp_abcdef0123456789@github.com/o/r.git"],
@@ -32,6 +37,19 @@ test("previews are redacted, never the full secret", () => {
   assert.ok(match);
   assert.ok(match.preview.length < 15);
   assert.ok(match.preview.includes("…"));
+});
+
+test("obvious placeholders are not treated as secrets", () => {
+  for (const ok of [
+    "sk-xxxxxxxxxxxxxxxxxxxx", // a doc example: pure repeated char
+    'password = "changeme-right-now"',
+    "token = ${GITHUB_TOKEN}", // template interpolation
+    "apiKey = OPENAI_API_KEY_VALUE", // a SCREAMING_SNAKE env-var name, not a key
+    "secret = your-secret-here-xxxx",
+    'api_key = "REDACTED_FOR_THE_DOCS"',
+  ]) {
+    assert.doesNotThrow(() => assertNoSecrets(ok), ok);
+  }
 });
 
 test("normal prose passes", () => {
