@@ -1,13 +1,39 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   envConsent,
   consentQuestion,
   decideConsent,
   parseConsent,
+  persistConsent,
   readConsent,
   writeConsent,
 } from "../src/consent.ts";
+
+test("persistConsent re-reads before writing, so a concurrent writer's scope is not lost", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pify-consent-"));
+  const file = join(dir, "pify-project-consent.json");
+  try {
+    // memory writes two scopes of its own; neither must clobber the other or a
+    // sibling package's, even across the await in the consent prompt.
+    persistConsent(file, "/repo", "memory", true);
+    persistConsent(file, "/repo", "observe", true);
+    const store = parseConsent(readFileSync(file, "utf8"));
+    assert.equal(readConsent(store, "/repo", "memory"), true);
+    assert.equal(readConsent(store, "/repo", "observe"), true);
+
+    writeFileSync(file, JSON.stringify(writeConsent({}, "/other", "agents", true)));
+    persistConsent(file, "/repo", "memory", false);
+    const merged = parseConsent(readFileSync(file, "utf8"));
+    assert.equal(readConsent(merged, "/other", "agents"), true);
+    assert.equal(readConsent(merged, "/repo", "memory"), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test("pi refusing the project is final", () => {
   // Nothing this extension asks may widen a decision pi already made.

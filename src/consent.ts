@@ -16,6 +16,8 @@
  * around the first.
  */
 
+import { readFileSync, writeFileSync } from "node:fs";
+
 /** What to do with a project-supplied file this session. */
 export type ConsentVerdict = "allow" | "refuse" | "ask";
 
@@ -78,6 +80,30 @@ export function writeConsent(
 ): ConsentFile {
   const key = normalizeCwd(cwd);
   return { ...file, [key]: { ...(file[key] ?? {}), [scope]: allowed } };
+}
+
+/**
+ * Record a consent answer to disk without losing a concurrent writer's scope.
+ *
+ * Several @pify packages share this one file (keyed by cwd → {scope: bool}), and
+ * each asks the user with an `await` between reading the file and writing it
+ * back. If two flows both read the old file, then both write, the second write
+ * drops the scope the first added. So re-read and re-parse the file HERE, right
+ * before writing, with no `await` in between — the merge always starts from the
+ * freshest on-disk state, and within a single (single-threaded) process the
+ * read-modify-write can no longer interleave. Cross-process races remain
+ * theoretically possible but fail safe: the worst case is a re-prompt, never a
+ * silently-granted consent.
+ */
+export function persistConsent(file: string, cwd: string, scope: string, allowed: boolean): void {
+  let raw: string | null = null;
+  try {
+    raw = readFileSync(file, "utf8");
+  } catch {
+    raw = null;
+  }
+  const next = writeConsent(parseConsent(raw), cwd, scope, allowed);
+  writeFileSync(file, `${JSON.stringify(next, null, 2)}\n`);
 }
 
 /** Tolerate anything on disk: a corrupt consent file means "never asked". */

@@ -54,8 +54,8 @@ import {
   decideConsent,
   envConsent,
   parseConsent,
+  persistConsent,
   readConsent,
-  writeConsent,
 } from "../src/consent.ts";
 import { dailyFile, localDateStr, resolvePaths, yesterdayStr } from "../src/paths.ts";
 import { ftsAvailable } from "../src/fts.ts";
@@ -147,8 +147,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
       ),
     );
     try {
-      writeFileSync(file, `${JSON.stringify(writeConsent(store, ctx.cwd, "memory", approved), null, 2)}
-`);
+      persistConsent(file, ctx.cwd, "memory", approved);
     } catch {
       // An unwritable consent file costs us the memory of the answer, not the answer.
     }
@@ -353,10 +352,8 @@ export default function memoryExtension(pi: ExtensionAPI) {
 
   function setObserveAllowed(ctx: ExtensionContext, enabled: boolean): void {
     observeEnabled = enabled;
-    const file = consentFile();
-    const store = parseConsent(readFileSafe(file));
     try {
-      writeFileSync(file, `${JSON.stringify(writeConsent(store, ctx.cwd, "observe", enabled), null, 2)}\n`);
+      persistConsent(consentFile(), ctx.cwd, "observe", enabled);
     } catch {
       // An unwritable store costs the memory of the answer, not the answer.
     }
