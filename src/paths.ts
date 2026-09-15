@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import type { MemoryPaths } from "./types.ts";
 
 type Env = Record<string, string | undefined>;
@@ -48,4 +48,30 @@ export function localTimeStr(d: Date = new Date()): string {
 
 export function dailyFile(dailyDir: string, dateStr: string): string {
   return join(dailyDir, `${dateStr}.md`);
+}
+
+/**
+ * A value that becomes a filename inside the memory store — a daily date, a
+ * recovery id — must be a single, self-contained path component. The command
+ * routes only ever build these from a strict shape (`YYYY-MM-DD`, a UUID); the
+ * model-facing tools take free-form arguments, so they call this to guarantee
+ * the same thing: no path separator, no drive/absolute prefix, no `..`
+ * traversal, no NUL. Anything else could steer a read or write outside the
+ * store. Returns the trimmed component; throws otherwise.
+ */
+export function assertSafeComponent(kind: string, value: string): string {
+  const v = value.trim();
+  if (
+    v === "" ||
+    v === "." ||
+    v === ".." ||
+    v.includes("/") ||
+    v.includes("\\") ||
+    v.includes(":") ||
+    v.includes("\0") ||
+    isAbsolute(v)
+  ) {
+    throw new Error(`Invalid ${kind} ${JSON.stringify(value)}: must be a plain name, not a path.`);
+  }
+  return v;
 }

@@ -57,7 +57,7 @@ import {
   persistConsent,
   readConsent,
 } from "../src/consent.ts";
-import { dailyFile, localDateStr, resolvePaths, yesterdayStr } from "../src/paths.ts";
+import { assertSafeComponent, dailyFile, localDateStr, resolvePaths, yesterdayStr } from "../src/paths.ts";
 import { ftsAvailable } from "../src/fts.ts";
 import { searchMemory } from "../src/search.ts";
 import { assertNoSecrets, scanForSecrets } from "../src/secrets.ts";
@@ -625,12 +625,21 @@ export default function memoryExtension(pi: ExtensionAPI) {
           details: { count: files.length },
         };
       }
-      const file =
-        params.target === "global"
-          ? p.globalMemory
-          : params.target === "project"
-            ? p.projectMemory
-            : dailyFile(p.dailyDir, params.date?.trim() || localDateStr());
+      let file: string;
+      if (params.target === "global") {
+        file = p.globalMemory;
+      } else if (params.target === "project") {
+        file = p.projectMemory;
+      } else {
+        // target === "daily": the date becomes a filename, so it takes the same
+        // strict YYYY-MM-DD shape the /memory read command enforces. A free-form
+        // model argument must never steer the read outside the daily log dir.
+        const date = params.date?.trim() || localDateStr();
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+          throw new Error(`memory_read: date must be YYYY-MM-DD (got ${JSON.stringify(date)}).`);
+        }
+        file = dailyFile(p.dailyDir, date);
+      }
       const content = readFileSafe(file);
       return {
         content: [{ type: "text", text: content ?? `(empty — ${file} does not exist yet)` }],
@@ -696,7 +705,10 @@ export default function memoryExtension(pi: ExtensionAPI) {
       recoveryId: Type.String(),
     }),
     async execute(_id, params: { recoveryId: string }, _signal, _onUpdate, ctx) {
-      const restored = restore(requirePaths(ctx as ExtensionContext), params.recoveryId.trim());
+      // The recovery id becomes a filename under recovery/, so a free-form model
+      // argument must be a plain component, not a path that reads elsewhere.
+      const recoveryId = assertSafeComponent("recovery id", params.recoveryId);
+      const restored = restore(requirePaths(ctx as ExtensionContext), recoveryId);
       return {
         content: [{ type: "text", text: `Restored ${restored} entr${restored > 1 ? "ies" : "y"}.` }],
         details: { restored },

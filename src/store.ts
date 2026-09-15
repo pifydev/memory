@@ -93,8 +93,11 @@ export function forget(paths: MemoryPaths, pattern: string): ForgetResult {
   const needle = pattern.trim().toLowerCase();
   if (!needle) return { recoveryId: null, removed: 0, files: [] };
 
+  // First pass: scan every target file and collect the removals plus the
+  // rewritten content, WITHOUT touching disk. A crash anywhere in this pass
+  // loses nothing — no memory file has been altered yet.
   const removals: RecoveryRecord["removals"] = [];
-  const touched: string[] = [];
+  const pending: Array<{ file: string; kept: string }> = [];
 
   for (const file of allMemoryFiles(paths)) {
     const content = readFileSafe(file);
@@ -111,17 +114,25 @@ export function forget(paths: MemoryPaths, pattern: string): ForgetResult {
         kept.push(line);
       }
     }
-    if (removedHere > 0) {
-      writeFileSync(file, kept.join("\n"));
-      touched.push(file);
-    }
+    if (removedHere > 0) pending.push({ file, kept: kept.join("\n") });
   }
 
   if (removals.length === 0) return { recoveryId: null, removed: 0, files: [] };
 
+  // The recovery record is written BEFORE any memory file is rewritten, so a
+  // crash mid-rewrite always leaves the undo record on disk: forget is always
+  // undoable (README promise).
   ensureDirs(paths);
   const record: RecoveryRecord = { id: randomUUID(), timestamp: Date.now(), removals };
   writeFileSync(join(paths.recoveryDir, `${record.id}.json`), JSON.stringify(record, null, 2));
+
+  // Second pass: only now rewrite the files, with the undo record already safe.
+  const touched: string[] = [];
+  for (const { file, kept } of pending) {
+    writeFileSync(file, kept);
+    touched.push(file);
+  }
+
   return { recoveryId: record.id, removed: removals.length, files: touched };
 }
 
