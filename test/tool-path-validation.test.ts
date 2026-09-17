@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import memoryExtension from "../extensions/memory.ts";
-import { assertSafeComponent } from "../src/paths.ts";
+import { assertSafeComponent, resolvePaths } from "../src/paths.ts";
 
 /**
  * The model-facing memory_read / memory_restore tools take free-form arguments
@@ -119,6 +119,34 @@ test("memory_read accepts a well-formed date", async () => {
       { cwd: join(base, "project") },
     )) as { content: Array<{ text: string }> };
     assert.match(result.content[0]!.text, /empty/);
+  } finally {
+    if (prev === undefined) delete process.env.PI_MEMORY_DIR;
+    else process.env.PI_MEMORY_DIR = prev;
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("memory_write joins a multi-line entry into a single bullet (f050)", async () => {
+  const base = mkdtempSync(join(tmpdir(), "pify-toolval-"));
+  const prev = process.env.PI_MEMORY_DIR;
+  process.env.PI_MEMORY_DIR = join(base, "global-memory");
+  try {
+    const cwd = join(base, "project");
+    const write = loadTools().get("memory_write")!;
+    await write.execute(
+      "id",
+      { scope: "global", text: "Deploy steps:\n1. run make\n2. push tag" },
+      undefined,
+      undefined,
+      { cwd },
+    );
+    const content = readFileSync(resolvePaths(cwd, process.env).globalMemory, "utf8");
+    // One bullet, no orphan continuation lines that forget could never reach.
+    const bullets = content.split("\n").filter((l) => l.startsWith("- "));
+    assert.equal(bullets.length, 1);
+    assert.equal(bullets[0], "- Deploy steps: 1. run make 2. push tag");
+    // Nothing but the header and the one bullet.
+    assert.ok(!/\n\d\./.test(content), "no bare continuation lines remain");
   } finally {
     if (prev === undefined) delete process.env.PI_MEMORY_DIR;
     else process.env.PI_MEMORY_DIR = prev;

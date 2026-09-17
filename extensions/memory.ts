@@ -48,6 +48,7 @@ import {
   parseConsolidation,
 } from "../src/consolidate.ts";
 import { buildInjectBlock, isInjectedInContext } from "../src/inject.ts";
+import { runPromptWithDeadline } from "../src/deadline.ts";
 import { withUiLock } from "../src/ui-lock.ts";
 import {
   consentQuestion,
@@ -123,13 +124,18 @@ export default function memoryExtension(pi: ExtensionAPI) {
    * question is ours to put, once per project.
    */
   async function projectMemoryAllowed(ctx: ExtensionContext, p: MemoryPaths): Promise<boolean> {
+    // A project file that does not exist yet is not a refusal — it is nothing
+    // to inject. Check existence on every call, BEFORE the memo, so a file the
+    // agent creates mid-session (memory_write scope=project) is reconsidered
+    // the next time the block is built rather than locked out by a "false"
+    // memoised from when the file was absent. Only a real verdict is cached.
+    if (!existsSync(p.projectMemory)) return false;
     if (projectConsent !== null) return projectConsent;
     projectConsent = await askProjectMemoryAllowed(ctx, p);
     return projectConsent;
   }
 
   async function askProjectMemoryAllowed(ctx: ExtensionContext, p: MemoryPaths): Promise<boolean> {
-    if (!existsSync(p.projectMemory)) return false;
     const file = consentFile();
     const store = parseConsent(readFileSafe(file));
     const verdict = decideConsent({
@@ -254,6 +260,11 @@ export default function memoryExtension(pi: ExtensionAPI) {
     ctx.ui.notify(`Consolidating ${file}…`, "info");
     let session: AgentSession | null = null;
     let answer = "";
+    // pi's PromptOptions has no `signal`, so a timeout must be enforced with a
+    // timer that aborts the session (see runPromptWithDeadline). prompt()
+    // resolves normally after an abort, so the flag records that the deadline
+    // fired and the answer is discarded.
+    let timedOut = false;
     try {
       const created = await createAgentSession({
         sessionManager: SessionManager.inMemory(ctx.cwd),
@@ -263,9 +274,11 @@ export default function memoryExtension(pi: ExtensionAPI) {
         resourceLoader: await loadedResourceLoader(ctx.cwd, CONSOLIDATE_SYSTEM_PROMPT),
       });
       session = created.session;
-      await session.prompt(buildConsolidatePrompt(target, before), {
-        signal: AbortSignal.timeout(CONSOLIDATE_TIMEOUT_MS),
-      } as never);
+      ({ timedOut } = await runPromptWithDeadline(
+        session,
+        buildConsolidatePrompt(target, before),
+        CONSOLIDATE_TIMEOUT_MS,
+      ));
       answer = answerText(session);
     } catch (err) {
       ctx.ui.notify(`Consolidation failed: ${err instanceof Error ? err.message : String(err)}`, "error");
@@ -276,6 +289,11 @@ export default function memoryExtension(pi: ExtensionAPI) {
       } catch {
         // best-effort
       }
+    }
+
+    if (timedOut) {
+      ctx.ui.notify(`Consolidation timed out after ${Math.round(CONSOLIDATE_TIMEOUT_MS / 1000)}s — nothing was changed.`, "error");
+      return;
     }
 
     const after = parseConsolidation(answer);
@@ -383,6 +401,12 @@ export default function memoryExtension(pi: ExtensionAPI) {
 
     let session: AgentSession | null = null;
     let answer = "";
+    // pi's PromptOptions has no `signal`, so the deadline is enforced with a
+    // timer that aborts the session (see runPromptWithDeadline). prompt()
+    // resolves normally after an abort, so a partially streamed answer could
+    // parse as valid notes and advance coverage over conversation the model
+    // never finished reading — the flag makes the run fail loudly instead.
+    let timedOut = false;
     try {
       const created = await createAgentSession({
         sessionManager: SessionManager.inMemory(cwd),
@@ -397,9 +421,11 @@ export default function memoryExtension(pi: ExtensionAPI) {
         resourceLoader: await loadedResourceLoader(cwd, OBSERVE_SYSTEM_PROMPT),
       });
       session = created.session;
-      await session.prompt(buildObservePrompt(slice.text, existing), {
-        signal: AbortSignal.timeout(OBSERVE_TIMEOUT_MS),
-      } as never);
+      ({ timedOut } = await runPromptWithDeadline(
+        session,
+        buildObservePrompt(slice.text, existing),
+        OBSERVE_TIMEOUT_MS,
+      ));
       answer = answerText(session);
     } finally {
       try {
@@ -407,6 +433,13 @@ export default function memoryExtension(pi: ExtensionAPI) {
       } catch {
         // best-effort
       }
+    }
+
+    // A stalled provider stream would otherwise keep `observing` true forever.
+    // Throw BEFORE parsing so a partial answer cannot advance coverage; the
+    // agent_end catch records this in lastObserveError so /memory can show it.
+    if (timedOut) {
+      throw new Error(`observer timed out after ${Math.round(OBSERVE_TIMEOUT_MS / 1000)}s`);
     }
 
     // An answer of nothing at all is not the same as a considered "NONE".
@@ -521,9 +554,23 @@ export default function memoryExtension(pi: ExtensionAPI) {
     });
   }
 
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
     const p = requirePaths(ctx);
     ensureDirs(p);
+
+    // Belt-and-braces: a wedged observer flag from a previous session must not
+    // outlive it. pi re-runs the extension factory on new/resume/fork/reload,
+    // so this closure is usually fresh already, but /reload keeps it — and a
+    // reload arriving mid-observe would keep `observing` true. Only reset when
+    // this is not a reload, so a run genuinely in flight is left alone.
+    if (event.reason !== "reload") observing = false;
+
+    // Resolve project-memory consent now, at session start, even though the
+    // block may already be in context (resume/reload). Otherwise the first
+    // caller of projectMemoryAllowed becomes session_compact, which would open
+    // the consent dialog in the middle of a compaction — the exact thing the
+    // projectConsent memo exists to avoid. A no-op when the file is absent.
+    await projectMemoryAllowed(ctx, p);
 
     // Dedupe across /reload and resume — against the entries the model can
     // actually see, not the raw branch. Those two lists diverge the moment a
@@ -583,7 +630,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
       "Never save credentials — writes are secret-scanned and rejected.",
     parameters: Type.Object({
       scope: StringEnum(["global", "project", "daily"] as const),
-      text: Type.String({ description: "One concise entry (a sentence or two)" }),
+      text: Type.String({ description: "One concise entry (a sentence or two); one line — newlines are joined" }),
       category: Type.Optional(StringEnum(LESSON_CATEGORIES)),
     }),
     async execute(
@@ -593,7 +640,12 @@ export default function memoryExtension(pi: ExtensionAPI) {
       _onUpdate,
       ctx,
     ) {
-      const text = params.text.trim();
+      // One entry is one bullet: forget removes a single `-` line, restore
+      // re-appends one line, extractLessons/consolidate read the first line
+      // only. A model that passes a multi-line procedure would otherwise leave
+      // orphan continuation lines that forget cannot reach and consolidate
+      // treats as structure — so newlines are joined into a single bullet.
+      const text = params.text.replace(/\s*\n+\s*/g, " ").trim();
       if (!text) throw new Error("memory_write requires non-empty text.");
       assertNoSecrets(text);
       const body = params.category ? formatLesson(params.category, text) : text;
@@ -837,14 +889,30 @@ export default function memoryExtension(pi: ExtensionAPI) {
         return c === null ? "—" : `${c.length} chars`;
       };
       const engine = (await ftsAvailable()) ? "FTS5 (node:sqlite, BM25)" : "scan (zero-dep fallback)";
+      // Say exactly what injection would do, computed the same way the block
+      // itself is: an env override or the live session memo can make the file
+      // injected while the on-disk store still holds no "memory" answer, and a
+      // project with no file is not a refusal. Keying only on readConsent lied
+      // in both directions.
+      const projectStatus = (() => {
+        if (!existsSync(p.projectMemory)) return " — (no project file)";
+        if (projectConsent === true) return " — injected";
+        if (projectConsent === false) return " — NOT injected: refused";
+        const verdict = decideConsent({
+          projectTrusted: ctx.isProjectTrusted(),
+          remembered: readConsent(parseConsent(readFileSafe(consentFile())), ctx.cwd, "memory"),
+          hasUI: ctx.hasUI,
+          envOverride: envConsent(process.env),
+        });
+        if (verdict === "allow") return " — injected";
+        if (verdict === "refuse") return " — NOT injected: refused";
+        return " — NOT injected: not yet asked";
+      })();
       ctx.ui.notify(
         [
           "Memory status",
           `  global   ${p.globalMemory} (${sizeOf(p.globalMemory)})`,
-          `  project  ${p.projectMemory} (${sizeOf(p.projectMemory)})` +
-            (readConsent(parseConsent(readFileSafe(consentFile())), ctx.cwd, "memory") === true
-              ? ""
-              : " — NOT injected: you have not approved this project's memory"),
+          `  project  ${p.projectMemory} (${sizeOf(p.projectMemory)})${projectStatus}`,
           `  daily    ${dailies.length} log(s) in ${p.dailyDir}`,
           `  search   ${engine}`,
           `  notes    ${

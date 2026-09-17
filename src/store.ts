@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -36,6 +37,44 @@ export function fileForScope(paths: MemoryPaths, scope: MemoryScope): string {
 }
 
 /**
+ * Append one line to a memory file without the read-modify-write that loses a
+ * concurrent writer's entry.
+ *
+ * `~/.pi/agent/memory/MEMORY.md` and today's daily log are shared by every pi
+ * process on the machine. The old "read whole file, concatenate, writeFileSync
+ * it back" would let two sessions each read N lines and each write N+1 — the
+ * second write silently discarding the first's entry, and worse, the truncate
+ * that precedes writeFileSync could leave a collided read seeing an empty file
+ * and rewrite MEMORY.md down to header + one line. An OS-level append is not
+ * clobbered by a concurrent appender (worst case is a stray blank line), so
+ * durable memory survives two sessions saving at once.
+ */
+function appendLine(file: string, header: string, entry: string): void {
+  const existing = readFileSafe(file);
+
+  // A truly new file gets its header written atomically. If a concurrent
+  // writer created it first (EEXIST), fall through to the append branch rather
+  // than clobbering the header and entry it just wrote.
+  if (existing === null) {
+    try {
+      writeFileSync(file, `${header}${entry}\n`, { flag: "wx" });
+      return;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== "EEXIST") throw err;
+    }
+  } else if (existing.trim() === "") {
+    // Existing but empty (or whitespace only): restore the header rather than
+    // appending a headerless bullet.
+    writeFileSync(file, `${header}${entry}\n`);
+    return;
+  }
+
+  // Existing non-empty file, or one that appeared during the creation race.
+  const current = existing ?? readFileSafe(file) ?? "";
+  appendFileSync(file, `${current === "" || current.endsWith("\n") ? "" : "\n"}${entry}\n`);
+}
+
+/**
  * Append one memory entry as a markdown bullet. Daily entries carry a local
  * time prefix; MEMORY.md entries are timeless (they are durable facts).
  */
@@ -45,17 +84,13 @@ export function appendEntry(paths: MemoryPaths, scope: MemoryScope, text: string
   if (scope === "project") mkdirSync(paths.projectDir, { recursive: true });
 
   const entry = scope === "daily" ? `- ${localTimeStr()} ${text.trim()}` : `- ${text.trim()}`;
-  const existing = readFileSafe(file);
   const header =
     scope === "daily"
       ? `# Daily log ${localDateStr()}\n\n`
       : scope === "project"
         ? "# Project memory\n\n"
         : "# Long-term memory\n\n";
-  const next = existing
-    ? `${existing.replace(/\n*$/, "\n")}${entry}\n`
-    : `${header}${entry}\n`;
-  writeFileSync(file, next);
+  appendLine(file, header, entry);
   return file;
 }
 
@@ -167,8 +202,10 @@ export function restore(paths: MemoryPaths, recoveryId: string): number {
     restored++;
   }
   for (const removal of record.removals ?? []) {
-    const content = readFileSafe(removal.file) ?? "";
-    writeFileSync(removal.file, `${content.replace(/\n*$/, "\n")}${removal.text}\n`);
+    // The forgotten line already carries its own bullet; re-append it with the
+    // same concurrency-safe helper (the header is only used on the rare empty
+    // file — forget keeps the header, so the file it removed from still has one).
+    appendLine(removal.file, "", removal.text);
     restored++;
   }
   return restored;

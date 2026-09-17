@@ -27,7 +27,7 @@ Daily logs are keyed by your **local** calendar day, not UTC, so "yesterday" mea
 |---|---|---|
 | `memory_write` | `scope`: `global` \| `project` \| `daily`, `text`, `category?` | Save one entry |
 | `memory_read` | `target`: `global` \| `project` \| `daily` \| `list`, `date?` | Read a memory file, or list the daily logs |
-| `memory_search` | `query` | Full-text search across every memory file |
+| `memory_search` | `query`, `limit?` (1–25, default 8) | Full-text search across every memory file |
 | `memory_forget` | `pattern` | Delete matching entries, writing a recovery record first |
 | `memory_restore` | `recoveryId` | Undo a `memory_forget` |
 
@@ -39,7 +39,7 @@ Daily logs are keyed by your **local** calendar day, not UTC, so "yesterday" mea
 - [failure] npm ci fails behind the proxy, use --offline
 ```
 
-Recent **failures and corrections are recalled unprompted** at the start of later sessions, newest first, capped at 8 entries and 30 days. A lesson you have to search for is a lesson that gets repeated; an old one about a file that no longer exists costs context and credibility. The other categories stay searchable but are not pushed at the agent.
+Recent **failures and corrections are recalled unprompted** at the start of later sessions, newest first, capped at 8 entries and 30 days. "Newest first" means dated daily lessons (within the 30-day window) come first, most recent first, ahead of the undated `MEMORY.md` lessons, which are ordered last-written-first — so a correction you make today is recalled ahead of an undated one of unknown age, and today's is never crowded out by the oldest eight. A lesson you have to search for is a lesson that gets repeated; an old one about a file that no longer exists costs context and credibility. The other categories stay searchable but are not pushed at the agent.
 
 ## Behaviour
 
@@ -50,6 +50,8 @@ Recent **failures and corrections are recalled unprompted** at the start of late
 - **Cache-stable injection.** Memory arrives once per session as a hidden message before your first prompt — the capped `MEMORY.md` tiers, today's and yesterday's logs, and an overview of the searchable archive. It never touches the system prompt, so the provider request prefix stays stable and prompt caching keeps working. This is measured rather than asserted: `bun run test/live/wire.mjs` captures the real provider payload and checks that the content reached the model, that it is **not** in the system prompt, and that the system prompt is byte-identical across runs.
 - **Secret gate.** Every write is scanned for AWS, GitHub, GitLab, Slack (tokens + webhooks), Stripe, SendGrid, Google (API + OAuth), OpenAI and npm keys, private key blocks, JWTs, `Authorization:` headers, credentials embedded in URLs, and `api_key=` assignments — and rejected with an explanation. Obvious non-secrets are let through so they don't block a real note: a doc example like `sk-xxxx…`, a template `${GITHUB_TOKEN}`, an env-var name, or a `changeme`/`REDACTED` placeholder. Credentials must never enter files that are re-injected into every session.
 - **Undoable forgetting.** `memory_forget` writes a recovery record before deleting and reports the id; `memory_restore <id>` puts the entries back.
+- **One entry, one line.** A saved entry is one markdown bullet: `memory_forget` removes a single `-` line, `memory_restore` re-appends one line, and lessons/consolidation read the first line only. A multi-line `memory_write` is joined into a single bullet so it cannot leave orphan continuation lines that forget can never reach.
+- **Concurrent writes do not clobber.** `~/.pi/agent/memory/MEMORY.md` and today's daily log are shared by every pi process on the machine. Writes append at the OS level rather than reading the whole file and writing it back, so two sessions saving at the same moment each keep their entry (worst case: a stray blank line) instead of the later write erasing the earlier one.
 - **Real search, zero dependencies.** BM25 full-text search through SQLite FTS5 via `node:sqlite`, built into Node 24+ and Bun. On Node 22 hosts it falls back silently to an in-process paragraph scan. Either way `memory_search` works out of the box, with nothing to install.
 
 ## Session notes, if you turn them on
@@ -65,6 +67,8 @@ Notes ride along inside the memory block, which means they arrive exactly when t
 
 Every note is **secret-scanned** before it is recorded. An observer reads the raw transcript, which is where a pasted key lives, and a note is re-injected into every request after a compaction — one leaked credential would be laundered from a single message into all of them.
 
+Each observer run has a **deadline** (two minutes; consolidation gets three). If the provider stream stalls with no bytes and no error, the run is aborted at the deadline and fails loudly rather than leaving note-taking wedged for the rest of the process — the coverage marker stays put so the next run retries the same stretch, and `/memory` shows the timeout under "last run failed" instead of silently going quiet.
+
 **Honest status:** measured live on `openai/gpt-5.6` and `qwen3-235b`, which both record the stated rule correctly (`test/live/observe-wire.mjs`, 5/5 each). `anthropic/claude-opus-5` via openrouter returns no text through this path — root cause found by A/B in pi's source: pi's model catalog marks that model `supportsMidConvoEffort`, which adds beta headers and `output_config` marker messages that openrouter's anthropic passthrough cannot digest, and the reply comes back empty. Confirmed: 0 chars without an override, a normal answer with `providers.openrouter.modelOverrides["anthropic/claude-opus-5"].compat.supportsMidConvoEffort = false` in `~/.pi/agent/models.json`. Until pi fixes the catalog, that override is the fix; without it the run still fails loudly and `/memory` says so rather than advancing silently.
 
 ## Consolidation you asked for
@@ -75,12 +79,13 @@ It only ever *proposes*. The result is refused outright if it invents an entry a
 
 ## Command
 
-`/memory` — status: file paths, sizes, which search engine is active, and whether session notes are on.
+`/memory` — status: file paths, sizes, which search engine is active, and whether session notes are on. The project line says exactly what injection would do — `injected`, `NOT injected: refused`, `NOT injected: not yet asked`, or `(no project file)` — computed the same way the block itself is, so an env override or the live session answer is reflected rather than only the on-disk store.
 `/memory observe on|off` — turn session note-taking on or off for this project.
 `/memory notes` — what this session has noted so far.
 `/memory search <query>` — search yourself, without going through the agent.
 `/memory read <global|project|list|YYYY-MM-DD>` — print a memory file.
 `/memory consolidate <global|project|YYYY-MM-DD>` — propose a merged, de-duplicated file.
+`/memory restore <id>` — undo a `memory_forget` or a consolidation by its recovery id (the id printed by the deletion or in the "Undo with:" notice).
 
 ## Conflicts
 

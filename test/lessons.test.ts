@@ -70,6 +70,37 @@ test("recall drops what is too old, and keeps undated entries", () => {
   assert.equal(recallLessons([stale], { today, maxAgeDays: 400 }).length, 1);
 });
 
+test("recall keeps the last-written undated lessons and a recent dated one, drops the oldest", () => {
+  const today = new Date(2026, 8, 17);
+  // Input arrives in file/append order: MEMORY.md's undated lessons oldest
+  // first, then a dated daily lesson. Before the fix, eight undated lessons
+  // always outranked the dated one and — worse — the eight recalled were the
+  // OLDEST, so a correction just written was exactly the one dropped.
+  const undated = Array.from({ length: 11 }, (_, i) => ({
+    category: "correction" as const,
+    text: `undated ${i}`,
+    file: "/m/MEMORY.md",
+    date: null,
+  }));
+  const dated = {
+    category: "failure" as const,
+    text: "dated recent",
+    file: "/m/daily/2026-09-16.md",
+    date: "2026-09-16",
+  };
+  const recalled = recallLessons([...undated, dated], { today });
+  const texts = recalled.map((l) => l.text);
+
+  assert.equal(recalled.length, DEFAULT_RECALL_LIMIT);
+  // The in-window dated lesson is recalled, ahead of undated ones.
+  assert.ok(texts.includes("dated recent"), "the recent dated lesson is recalled");
+  assert.equal(texts[0], "dated recent", "dated lessons rank ahead of undated");
+  // The last-written undated lesson is recalled; the oldest are the ones dropped.
+  assert.ok(texts.includes("undated 10"), "the newest undated lesson is recalled");
+  assert.ok(!texts.includes("undated 0"), "the oldest undated lesson is dropped");
+  assert.ok(!texts.includes("undated 3"), "older undated lessons are dropped past the cap");
+});
+
 test("recall is bounded so memory cannot crowd out the conversation", () => {
   const many = Array.from({ length: 40 }, (_, i) => ({
     category: "failure" as const,

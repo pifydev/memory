@@ -1,8 +1,19 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { spawn } from "node:child_process";
+import {
+  appendFileSync,
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { resolvePaths, localDateStr } from "../src/paths.ts";
 import {
   allMemoryFiles,
@@ -148,4 +159,81 @@ test("forget with no matches writes no recovery", () => {
 
 test("readFileSafe returns null for missing files", () => {
   assert.equal(readFileSafe(join(tmpdir(), "definitely-missing-xyz.md")), null);
+});
+
+test("appendEntry appends rather than rewriting, so it cannot clobber another writer", () => {
+  const { base, paths } = tempPaths();
+  try {
+    appendEntry(paths, "global", "first");
+    // Stand in for a second pi process appending directly between our writes.
+    appendFileSync(paths.globalMemory, "- from another process\n");
+    appendEntry(paths, "global", "second");
+    const content = readFileSync(paths.globalMemory, "utf8");
+    // Every entry survives — the read-modify-write version could drop the
+    // out-of-band line if it had read a stale copy.
+    assert.ok(content.includes("- first\n"));
+    assert.ok(content.includes("- from another process\n"));
+    assert.ok(content.includes("- second\n"));
+    // Exactly one header, and it stays at the top.
+    assert.equal((content.match(/# Long-term memory/g) ?? []).length, 1);
+    assert.ok(content.startsWith("# Long-term memory"));
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("appendEntry restores the header on an existing-but-empty file", () => {
+  const { base, paths } = tempPaths();
+  try {
+    // A file that exists but holds only whitespace (e.g. an editor left it blank)
+    // must get its header back, not a headerless bullet.
+    mkdirSync(paths.globalDir, { recursive: true });
+    writeFileSync(paths.globalMemory, "\n  \n");
+    appendEntry(paths, "global", "revived");
+    const content = readFileSync(paths.globalMemory, "utf8");
+    assert.ok(content.startsWith("# Long-term memory"));
+    assert.ok(content.includes("- revived\n"));
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+const CONCURRENT_WORKER = fileURLToPath(new URL("./concurrent-append-worker.ts", import.meta.url));
+
+function runWorker(env: NodeJS.ProcessEnv, args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [CONCURRENT_WORKER, ...args], {
+      env,
+      // stdio piped (not inherited) so a numeric-fd inherit cannot hang the
+      // runner on Windows/bun; we do not need the output.
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    child.on("error", reject);
+    child.on("close", (code) => (code === 0 ? resolve() : reject(new Error(`worker exited ${code}`))));
+  });
+}
+
+test("two concurrent appendEntry writers keep every entry", async () => {
+  const base = mkdtempSync(join(tmpdir(), "pify-memory-conc-"));
+  try {
+    const cwd = join(base, "project");
+    const globalDir = join(base, "global-memory");
+    const env = { ...process.env, PI_MEMORY_DIR: globalDir };
+    const N = 150;
+    // Both processes hammer the same global MEMORY.md at once. The old
+    // read-concat-write lost one writer's entries (and could truncate the file
+    // to header + one line); the OS-level append keeps all of them.
+    await Promise.all([
+      runWorker(env, [cwd, "A", String(N)]),
+      runWorker(env, [cwd, "B", String(N)]),
+    ]);
+    const content = readFileSync(join(globalDir, "MEMORY.md"), "utf8");
+    const bullets = content.split("\n").filter((l) => l.startsWith("- "));
+    assert.equal(bullets.length, 2 * N, "no writer's entries were clobbered");
+    assert.equal(bullets.filter((l) => l.includes("A-")).length, N, "all of writer A survived");
+    assert.equal(bullets.filter((l) => l.includes("B-")).length, N, "all of writer B survived");
+    assert.equal((content.match(/# Long-term memory/g) ?? []).length, 1, "exactly one header");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
 });
