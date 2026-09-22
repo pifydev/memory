@@ -16,11 +16,7 @@
  * pi-knowledge-search); secret scanning (pi-hermes-memory).
  */
 import {
-  DefaultResourceLoader,
-  SessionManager,
-  createAgentSession,
   getAgentDir,
-  type AgentSession,
   type ExtensionAPI,
   type ExtensionCommandContext,
   type ExtensionContext,
@@ -48,7 +44,7 @@ import {
   parseConsolidation,
 } from "../src/consolidate.ts";
 import { buildInjectBlock, isInjectedInContext } from "../src/inject.ts";
-import { runPromptWithDeadline } from "../src/deadline.ts";
+import { runModelCall } from "../src/model-call.ts";
 import { withUiLock } from "../src/ui-lock.ts";
 import {
   consentQuestion,
@@ -160,64 +156,6 @@ export default function memoryExtension(pi: ExtensionAPI) {
     return approved;
   }
 
-  /**
-   * The model's answer, from the last assistant message that actually has
-   * text in it.
-   *
-   * Not simply the last assistant message: a thinking model's final message
-   * can carry only reasoning blocks, and taking it would yield an empty
-   * answer with no error to explain it.
-   *
-   * Defensive, and honestly so — no measured case yet shows it changing an
-   * outcome. It was written while chasing the empty answers from
-   * anthropic/claude-opus-5 and it is *not* the cure for those: that model
-   * returns no text anywhere in the conversation through this path, scanning
-   * backwards or not, while openai/gpt-5.6 and qwen3-235b both answer
-   * normally. The empty-answer guard below is what actually makes that
-   * visible.
-   */
-  function answerText(session: AgentSession): string {
-    const messages = session.messages as Array<{
-      role?: string;
-      content?: Array<{ type?: string; text?: string }>;
-    }>;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const message = messages[i];
-      if (message?.role !== "assistant") continue;
-      const text = (message.content ?? [])
-        .filter((part) => part.type === "text" && typeof part.text === "string")
-        .map((part) => part.text)
-        .join("")
-        .trim();
-      if (text) return text;
-    }
-    return "";
-  }
-
-  /**
-   * A resource loader that has actually loaded.
-   *
-   * `createAgentSession` only calls `reload()` on a loader it creates itself;
-   * one passed in is used exactly as handed over, and a freshly constructed
-   * `DefaultResourceLoader` has an empty `appendSystemPrompt` until it loads.
-   * So a system prompt supplied this way is silently dropped — the call
-   * succeeds, the model answers, and it answers without its instructions.
-   * Measured: with a loader that appends "begin every reply with BANANA", the
-   * reply began with BANANA only after `reload()`.
-   */
-  async function loadedResourceLoader(cwd: string, systemPrompt: string): Promise<DefaultResourceLoader> {
-    const loader = new DefaultResourceLoader({
-      cwd,
-      agentDir: getAgentDir(),
-      noExtensions: true,
-      noPromptTemplates: true,
-      noThemes: true,
-      appendSystemPrompt: [systemPrompt],
-    } as never);
-    await loader.reload();
-    return loader;
-  }
-
   function loadDocs(p: MemoryPaths) {
     return allMemoryFiles(p)
       .map((file) => ({ file, content: readFileSafe(file) ?? "" }))
@@ -257,46 +195,42 @@ export default function memoryExtension(pi: ExtensionAPI) {
       return;
     }
 
-    ctx.ui.notify(`Consolidating ${file}…`, "info");
-    let session: AgentSession | null = null;
-    let answer = "";
-    // pi's PromptOptions has no `signal`, so a timeout must be enforced with a
-    // timer that aborts the session (see runPromptWithDeadline). prompt()
-    // resolves normally after an abort, so the flag records that the deadline
-    // fired and the answer is discarded.
-    let timedOut = false;
-    try {
-      const created = await createAgentSession({
-        sessionManager: SessionManager.inMemory(ctx.cwd),
-        model: ctx.model as never,
-        // No tools: this is a pure text transformation of content we hand it.
-        tools: [],
-        resourceLoader: await loadedResourceLoader(ctx.cwd, CONSOLIDATE_SYSTEM_PROMPT),
-      });
-      session = created.session;
-      ({ timedOut } = await runPromptWithDeadline(
-        session,
-        buildConsolidatePrompt(target, before),
-        CONSOLIDATE_TIMEOUT_MS,
-      ));
-      answer = answerText(session);
-    } catch (err) {
-      ctx.ui.notify(`Consolidation failed: ${err instanceof Error ? err.message : String(err)}`, "error");
+    const model = ctx.model;
+    if (!model) {
+      ctx.ui.notify("No model is configured — cannot consolidate.", "error");
       return;
-    } finally {
-      try {
-        session?.dispose();
-      } catch {
-        // best-effort
-      }
     }
 
-    if (timedOut) {
+    ctx.ui.notify(`Consolidating ${file}…`, "info");
+    // The deadline is a real AbortSignal.timeout now, not a timer that aborts an
+    // in-memory session: streamSimple honours the signal and resolves the stream
+    // to an "aborted" message, which runModelCall reports as timedOut. No loader,
+    // no session, no dispose. A setup failure (auth missing) comes back as a
+    // synchronous throw or an "error" stopReason; runModelCall folds both into
+    // `error`, which is the notice the old catch used to raise.
+    const outcome = await runModelCall(async () => {
+      const stream = ctx.modelRegistry.streamSimple(
+        model,
+        {
+          // No tools: this is a pure text transformation of content we hand it.
+          systemPrompt: CONSOLIDATE_SYSTEM_PROMPT,
+          messages: [{ role: "user", content: buildConsolidatePrompt(target, before), timestamp: Date.now() }],
+        },
+        { signal: AbortSignal.timeout(CONSOLIDATE_TIMEOUT_MS) },
+      );
+      return stream.result();
+    });
+
+    if (outcome.timedOut) {
       ctx.ui.notify(`Consolidation timed out after ${Math.round(CONSOLIDATE_TIMEOUT_MS / 1000)}s — nothing was changed.`, "error");
       return;
     }
+    if (outcome.error) {
+      ctx.ui.notify(`Consolidation failed: ${outcome.error}`, "error");
+      return;
+    }
 
-    const after = parseConsolidation(answer);
+    const after = parseConsolidation(outcome.text);
     if (!after) {
       ctx.ui.notify("The model did not return a usable markdown block — nothing was changed.", "warning");
       return;
@@ -391,57 +325,54 @@ export default function memoryExtension(pi: ExtensionAPI) {
    * `MEMORY.md` and the daily logs are still written only when asked.
    */
   async function observe(input: {
-    cwd: string;
-    model: unknown;
+    model: NonNullable<ExtensionContext["model"]>;
+    modelRegistry: ExtensionContext["modelRegistry"];
     existing: readonly Observation[];
     slice: { text: string; upToId: string | null };
   }): Promise<void> {
-    const { cwd, model, existing, slice } = input;
+    const { model, modelRegistry, existing, slice } = input;
     if (!slice.text.trim() || !slice.upToId) return;
 
-    let session: AgentSession | null = null;
-    let answer = "";
-    // pi's PromptOptions has no `signal`, so the deadline is enforced with a
-    // timer that aborts the session (see runPromptWithDeadline). prompt()
-    // resolves normally after an abort, so a partially streamed answer could
-    // parse as valid notes and advance coverage over conversation the model
-    // never finished reading — the flag makes the run fail loudly instead.
-    let timedOut = false;
-    try {
-      const created = await createAgentSession({
-        sessionManager: SessionManager.inMemory(cwd),
-        model: model as never,
-        // Note-taking does not need extended thinking, and paying for it on
-        // every slice of every session is the wrong default for a background
-        // job. (Tried as a fix for the empty answers from claude-opus-5 too;
-        // it is not one — that model still returns no text through this path.)
-        thinkingLevel: "off",
-        // No tools: the observer reads what it is given and writes lines.
-        tools: [],
-        resourceLoader: await loadedResourceLoader(cwd, OBSERVE_SYSTEM_PROMPT),
-      });
-      session = created.session;
-      ({ timedOut } = await runPromptWithDeadline(
-        session,
-        buildObservePrompt(slice.text, existing),
-        OBSERVE_TIMEOUT_MS,
-      ));
-      answer = answerText(session);
-    } finally {
-      try {
-        session?.dispose();
-      } catch {
-        // best-effort
-      }
-    }
+    // The deadline is a real AbortSignal.timeout now, not a timer that aborts an
+    // in-memory session: streamSimple honours the signal and resolves the stream
+    // to an "aborted" message, which runModelCall reports as timedOut. No loader,
+    // no session, no dispose. A setup failure (auth missing) comes back as a
+    // synchronous throw or an "error" stopReason; runModelCall folds both into
+    // `error`.
+    const outcome = await runModelCall(async () => {
+      // Note-taking does not need extended thinking, and paying for it on every
+      // slice of every session is the wrong default for a background job — the
+      // old child session set thinkingLevel "off" for exactly that reason.
+      // streamSimple's `reasoning` has no "off"; omitting it is how "off" maps
+      // across. (Extended thinking was tried as a fix for the empty answers
+      // from claude-opus-5 too; it is not one — that model still returns no
+      // text through this path.)
+      const stream = modelRegistry.streamSimple(
+        model,
+        {
+          // No tools: the observer reads what it is given and writes lines.
+          systemPrompt: OBSERVE_SYSTEM_PROMPT,
+          messages: [{ role: "user", content: buildObservePrompt(slice.text, existing), timestamp: Date.now() }],
+        },
+        { signal: AbortSignal.timeout(OBSERVE_TIMEOUT_MS) },
+      );
+      return stream.result();
+    });
 
-    // A stalled provider stream would otherwise keep `observing` true forever.
-    // Throw BEFORE parsing so a partial answer cannot advance coverage; the
-    // agent_end catch records this in lastObserveError so /memory can show it.
-    if (timedOut) {
+    // A stalled or failed stream must fail the run loudly BEFORE any parsing, so
+    // a partial or absent answer cannot advance coverage. The agent_end catch
+    // records the message in lastObserveError so /memory can show it; the
+    // coverage marker stays put and the next run sees a larger slice.
+    if (outcome.timedOut) {
       throw new Error(`observer timed out after ${Math.round(OBSERVE_TIMEOUT_MS / 1000)}s`);
     }
+    // A setup/provider failure used to throw out of prompt() and land in the
+    // same catch; now it is encoded in the stream, so re-raise it explicitly.
+    if (outcome.error) {
+      throw new Error(outcome.error);
+    }
 
+    const answer = outcome.text;
     // An answer of nothing at all is not the same as a considered "NONE".
     // Some models return only reasoning blocks through this path and no text
     // — measured on anthropic/claude-opus-5, which answered 0 characters
@@ -483,15 +414,22 @@ export default function memoryExtension(pi: ExtensionAPI) {
       return;
     }
 
+    // No model configured for this session — nothing to call. Skip quietly,
+    // leaving coverage untouched so a later session with a model picks the
+    // slice up. streamSimple needs a concrete model and there is nothing here
+    // to fall back to.
+    if (!uiCtx.model) return;
+
     // Everything the run needs is read here, synchronously, and handed over
     // as plain values. A background task must not keep the event's `ctx`:
     // a compaction replaces the session underneath it, and the next property
     // access throws "this extension ctx is stale". Which is exactly what
     // happened — the observer ran, failed on its first ctx read, and left no
-    // trace but a silent catch.
+    // trace but a silent catch. The model registry is an app-level service, not
+    // session-scoped, so the captured reference stays valid across a compaction.
     const captured = {
-      cwd: uiCtx.cwd,
       model: uiCtx.model,
+      modelRegistry: uiCtx.modelRegistry,
       existing,
       slice: sliceTranscript(branch, coversUpToId, OBSERVER_BLIND_TO),
     };
