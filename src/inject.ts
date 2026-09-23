@@ -103,6 +103,8 @@ export function buildInjectBlock(input: InjectInput): string | null {
     // anyone with repo access can edit. Current evidence has to win, out loud.
     "If it conflicts with what you can see now — the request, the files, a command's output —",
     "prefer what you can see, and say that memory disagreed.",
+    "If a note names a file, function, or flag, confirm it still exists before recommending or relying on it —",
+    "a note records what was true when it was written, not now.",
     "",
     sections.join("\n\n"),
     "</memory>",
