@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { assertNoSecrets, scanForSecrets } from "../src/secrets.ts";
+import { assertNoSecrets, scanForSecrets, envSecretLiterals } from "../src/secrets.ts";
 
 test("blocks the well-known credential shapes", () => {
   const samples: Array<[string, string]> = [
@@ -70,4 +70,25 @@ test("normal prose passes", () => {
   ]) {
     assert.doesNotThrow(() => assertNoSecrets(ok), ok);
   }
+});
+
+test("the environment's own secret values are known to the gate, shape or no shape", () => {
+  const literals = envSecretLiterals({
+    INTERNAL_API_KEY: "q7Zp0rW2mKx9",         // no known prefix, no keyword nearby: only its value gives it away
+    DATABASE_URL: "postgres://app:S3cr3tPassw0rd@db.internal:5432/app",
+    PAGER: "cat",                             // not a secret-shaped name
+    DEBUG_TOKEN: "true",                      // a word, not a credential
+    SESSION_SECRET: "changeme",               // placeholder
+    SHORT_KEY: "abc1",                        // too short
+    PATH: "/usr/bin",
+  });
+  assert.deepEqual(literals.sort(), ["S3cr3tPassw0rd", "q7Zp0rW2mKx9"]);
+
+  const hit = scanForSecrets("the internal key is q7Zp0rW2mKx9, use it for staging", literals);
+  assert.equal(hit.length, 1);
+  assert.equal(hit[0]!.label, "known credential from the environment");
+  assert.ok(!hit[0]!.preview.includes("q7Zp0rW2mKx9"), "the preview never carries the whole value");
+  assert.equal(scanForSecrets("name the env var INTERNAL_API_KEY instead", literals).length, 0);
+  // With no literals handed in and none in a clean env, prose still passes.
+  assert.equal(scanForSecrets("plain note about the limiter", []).length, 0);
 });

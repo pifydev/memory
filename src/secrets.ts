@@ -90,16 +90,71 @@ export function isPlaceholderValue(raw: string): boolean {
   return false;
 }
 
-export function scanForSecrets(text: string): SecretMatch[] {
+/**
+ * Variable names that hold credentials, by convention. The VALUE of such a
+ * variable is a secret whatever it looks like — an internal API key with no
+ * provider prefix and no `token =` beside it passes every pattern above, yet
+ * the exact string is sitting in the environment. (oh-my-pi's secrets/index.ts
+ * registers these; this is the save-time half.)
+ */
+const SECRET_NAME_RE = /(KEY|SECRET|TOKEN|PASSWORD|PASSWD|AUTH|CREDENTIAL|PRIVATE|OAUTH)/i;
+/** A value that is a plain word is configuration, not a credential — a gate refusal is not lossless, so precision wins. */
+const WORD_VALUES = new Set([
+  "password", "changeme", "disabled", "enabled", "true", "false", "localhost", "default", "example",
+  "secret", "token", "undefined", "null", "none", "required", "optional", "development", "production",
+]);
+function looksLikeWord(value: string): boolean {
+  const s = value.toLowerCase();
+  return WORD_VALUES.has(s) || /^[a-z]{1,15}$/.test(value);
+}
+
+/**
+ * The literal secret values this process knows: values of secret-shaped
+ * variables (8+ chars, not a word, not a placeholder) and the password of any
+ * `scheme://user:pass@host` value under any name. Never persisted or logged;
+ * only ever compared against.
+ */
+export function envSecretLiterals(env: Record<string, string | undefined> = process.env): string[] {
+  const out = new Set<string>();
+  for (const [name, raw] of Object.entries(env)) {
+    if (typeof raw !== "string") continue;
+    const value = raw.trim();
+    if (!value) continue;
+    const url = /^[a-z][a-z0-9+.-]*:\/\/[^\s:/?#@]+:([^\s:/?#@]+)@/i.exec(value);
+    if (url?.[1] && url[1].length >= 8 && !looksLikeWord(url[1]) && !isPlaceholderValue(url[1])) out.add(url[1]);
+    if (!SECRET_NAME_RE.test(name)) continue;
+    if (value.length < 8 || looksLikeWord(value) || isPlaceholderValue(value)) continue;
+    out.add(value);
+  }
+  return [...out];
+}
+
+let knownLiterals: string[] | null = null;
+/** Computed once per process from the environment pi was started with. */
+function envLiterals(): string[] {
+  if (knownLiterals === null) knownLiterals = envSecretLiterals();
+  return knownLiterals;
+}
+
+function previewOf(raw: string): string {
+  return raw.length <= 12 ? `${raw.slice(0, 4)}…` : `${raw.slice(0, 8)}…${raw.slice(-2)}`;
+}
+
+export function scanForSecrets(text: string, literals: readonly string[] = envLiterals()): SecretMatch[] {
   const matches: SecretMatch[] = [];
   for (const { label, re, valueGroup } of PATTERNS) {
     const m = re.exec(text);
     if (!m) continue;
     const value = valueGroup ? (m[valueGroup] ?? m[0]) : m[0];
     if (isPlaceholderValue(value)) continue; // a doc example / template, not a secret
-    const raw = m[0];
-    const preview = raw.length <= 12 ? `${raw.slice(0, 4)}…` : `${raw.slice(0, 8)}…${raw.slice(-2)}`;
-    matches.push({ label, preview });
+    matches.push({ label, preview: previewOf(m[0]) });
+  }
+  // A value the environment holds is a credential by definition, shape or no shape.
+  for (const literal of literals) {
+    if (text.includes(literal)) {
+      matches.push({ label: "known credential from the environment", preview: previewOf(literal) });
+      break;
+    }
   }
   return matches;
 }
