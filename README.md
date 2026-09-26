@@ -86,6 +86,7 @@ It only ever *proposes*. The result is refused outright if it invents an entry a
 `/memory read <global|project|list|YYYY-MM-DD>` — print a memory file.
 `/memory consolidate <global|project|YYYY-MM-DD>` — propose a merged, de-duplicated file.
 `/memory restore <id>` — undo a `memory_forget` or a consolidation by its recovery id (the id printed by the deletion or in the "Undo with:" notice).
+`/memory skill <name> <query>` — promote the lessons that match `<query>` into a pi skill at `<agentDir>/skills/<name>/SKILL.md`: you see the file, confirm, it is written and pi reloads. A procedure that keeps coming up as a `[failure]`/`[correction]` bullet becomes something discoverable by name. It passes the secret gate, is capped at 64KB, and never overwrites a skill this command did not write.
 
 ## Conflicts
 

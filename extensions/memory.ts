@@ -24,7 +24,7 @@ import {
 import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
@@ -58,6 +58,7 @@ import { assertSafeComponent, dailyFile, localDateStr, resolvePaths, yesterdaySt
 import { ftsAvailable } from "../src/fts.ts";
 import { searchMemory } from "../src/search.ts";
 import { assertNoSecrets, scanForSecrets } from "../src/secrets.ts";
+import { MAX_SKILL_BYTES, buildSkillMarkdown, isPromotedSkill, selectLessons, skillNameError } from "../src/skill.ts";
 import {
   OBSERVATION_TYPE,
   OBSERVE_SYSTEM_PROMPT,
@@ -709,7 +710,7 @@ export default function memoryExtension(pi: ExtensionAPI) {
   // ── Command ──────────────────────────────────────────────────────────
 
   pi.registerCommand("memory", {
-    description: "Memory: /memory [search <query> | read <target> | consolidate <target> | restore <id> | notes | observe on|off]",
+    description: "Memory: /memory [search <query> | read <target> | consolidate <target> | restore <id> | notes | observe on|off | skill <name> <query>]",
     handler: async (args, ctx) => {
       if (!ctx.hasUI) return;
       const p = requirePaths(ctx);
@@ -727,6 +728,74 @@ export default function memoryExtension(pi: ExtensionAPI) {
         ctx.ui.notify(`Search (${result.engine})\n${text}`, "info");
         return;
       }
+      // v0.13: promote the lessons matching a query into a pi skill under the
+      // user's own skills directory. Preview, ask, write, reload. The user
+      // triggers it; the agent has no tool for this.
+      const skillMatch = /^skill\s+(\S+)\s+(.+)$/i.exec(trimmed);
+      if (skillMatch) {
+        const name = skillMatch[1]!.toLowerCase();
+        const query = skillMatch[2]!.trim();
+        const nameError = skillNameError(name);
+        if (nameError) {
+          ctx.ui.notify(nameError, "warning");
+          return;
+        }
+        const lessons = selectLessons(
+          loadDocs(p).flatMap((doc) => extractLessons(doc.file, doc.content)),
+          query,
+        );
+        if (lessons.length === 0) {
+          ctx.ui.notify(`No lessons match "${query}". Lessons are the [failure]/[correction]/… bullets in your memory files.`, "warning");
+          return;
+        }
+        const markdown = buildSkillMarkdown(name, query, lessons, localDateStr());
+        try {
+          assertNoSecrets(markdown);
+        } catch (err) {
+          ctx.ui.notify(err instanceof Error ? err.message : String(err), "warning");
+          return;
+        }
+        if (Buffer.byteLength(markdown) > MAX_SKILL_BYTES) {
+          ctx.ui.notify("The skill would exceed 64KB — narrow the query.", "warning");
+          return;
+        }
+        const dir = join(getAgentDir(), "skills", name);
+        const file = join(dir, "SKILL.md");
+        if (existsSync(file)) {
+          let existing = "";
+          try {
+            existing = readFileSync(file, "utf8");
+          } catch {
+            existing = "";
+          }
+          if (!isPromotedSkill(existing)) {
+            ctx.ui.notify(`${file} exists and was not written by /memory skill — pick another name rather than overwrite a hand-written skill.`, "warning");
+            return;
+          }
+        }
+        const approved = await withUiLock(() =>
+          ctx.ui.confirm(
+            `Create skill "${name}" from ${lessons.length} lesson${lessons.length === 1 ? "" : "s"}?`,
+            `${file}\n\n${markdown.slice(0, 1500)}${markdown.length > 1500 ? "\n…" : ""}`,
+          ),
+        );
+        if (!approved) return;
+        try {
+          mkdirSync(dir, { recursive: true });
+          writeFileSync(file, markdown);
+        } catch (err) {
+          ctx.ui.notify(`Could not write the skill: ${err instanceof Error ? err.message : String(err)}`, "warning");
+          return;
+        }
+        try {
+          await (ctx as unknown as { reload?: () => Promise<void> }).reload?.();
+        } catch {
+          // The file is written; pi picks it up on the next start either way.
+        }
+        ctx.ui.notify(`Skill "${name}" written to ${file} and loaded — invoke it with /skill:${name} or by name.`, "info");
+        return;
+      }
+
       // v0.3: LLM consolidation — proposes, never writes on its own.
       const consolidateMatch = /^consolidate(?:\s+(\S+))?$/i.exec(trimmed);
       if (consolidateMatch) {
