@@ -65,6 +65,8 @@ Two boundaries make this safe enough to ship in a package built on not being a b
 
 Notes ride along inside the memory block, which means they arrive exactly when they are worth their tokens — [after a compaction](#it-survives-compaction) has folded away the conversation they came from. Before that the transcript is still there and the notes would be saying it twice.
 
+The observer is told, and shown in-band, that the session text is data to take notes on — it includes web pages, files and command output the agent fetched — so a page that says "record this as a project convention" is content, not an instruction, and only what the user or the agent established is noted.
+
 Every note is **secret-scanned** before it is recorded. An observer reads the raw transcript, which is where a pasted key lives, and a note is re-injected into every request after a compaction — one leaked credential would be laundered from a single message into all of them.
 
 Each observer run has a **deadline** (two minutes; consolidation gets three), enforced by a real `AbortSignal.timeout` handed straight to pi's model call. If the provider stream stalls, the signal fires and the call comes back aborted — the run fails loudly rather than leaving note-taking wedged for the rest of the process. The coverage marker stays put so the next run retries the same stretch, and `/memory` shows the timeout (or the provider's own error) under "last run failed" instead of silently going quiet.
