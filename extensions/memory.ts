@@ -91,6 +91,8 @@ const CONSOLIDATE_TIMEOUT_MS = 180_000;
 const OBSERVE_TIMEOUT_MS = 120_000;
 /** Entry kinds the observer must not read: its own output and its own block. */
 const OBSERVER_BLIND_TO = [MEMORY_CONTEXT_TYPE, OBSERVATION_TYPE];
+/** New transcript a before-compaction observe needs before it is worth a model call. */
+const COMPACT_OBSERVE_MIN_CHARS = 2000;
 /** Below this, consolidation cannot pay for its own model call. */
 const MIN_ENTRIES_TO_CONSOLIDATE = 4;
 
@@ -442,6 +444,34 @@ export default function memoryExtension(pi: ExtensionAPI) {
       .catch((err) => {
         lastObserveError = err instanceof Error ? err.message : String(err);
         // A failed run leaves coverage alone; the next one sees more.
+      })
+      .finally(() => {
+        observing = false;
+      });
+  });
+
+  // Context pressure is a second, independent trigger for note-taking (ECC's
+  // learn eh-9). The cadence above fires at a settled boundary once enough new
+  // transcript has accumulated; but pi compacts on its own schedule, and the
+  // slice it is about to summarise away is exactly the material a note should
+  // capture first. So observe once right before a compaction too — bypassing
+  // the char cadence, but still only for a non-trivial slice and a free
+  // observer, and fire-and-forget so compaction never waits on it. Values are
+  // read synchronously here, so the captured references survive the compaction
+  // that replaces the session.
+  pi.on("session_before_compact", async (_event, ctx) => {
+    const uiCtx = ctx as ExtensionContext;
+    if (observing || !observeAllowed(uiCtx) || !uiCtx.model) return;
+    const branch = uiCtx.sessionManager.getBranch() as never as unknown[];
+    const { notes: existing, coversUpToId } = replayObservations(branch);
+    const slice = sliceTranscript(branch, coversUpToId, OBSERVER_BLIND_TO);
+    if (slice.text.trim().length < COMPACT_OBSERVE_MIN_CHARS) return;
+    const captured = { model: uiCtx.model, modelRegistry: uiCtx.modelRegistry, existing, slice };
+    observing = true;
+    lastObserveError = null;
+    void observe(captured)
+      .catch((err) => {
+        lastObserveError = err instanceof Error ? err.message : String(err);
       })
       .finally(() => {
         observing = false;
